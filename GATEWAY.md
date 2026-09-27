@@ -27,12 +27,15 @@ TLS 保留完整的 CA、有效期和 IP SAN 校验。不能关闭证书校验�
 
 ## 本地验证
 
+`GET /internal/phone-config` 是部署工具专用接口，先以 `X-Tiyu-Gateway-Key` 验证现有共享密钥；未授权返回 404，配置不完整返回 503。只读取平台注入的 `COZE_PROJECT_ID`、`COZE_PROJECT_ENV`、`COZE_SUPABASE_URL`、`COZE_SUPABASE_ANON_KEY`，拒绝高权限 key，返回项目、环境、规范化 HTTPS origin 和匿名公钥，所有响应禁止缓存。调用方必须核对精确项目和 `PROD` 后才启用生产短信；不能拿 DEV 配置代替。此接口不创建资源、不发短信、不更改身份配置。
+
 ```sh
 pnpm test:gateway
 pnpm exec tsc --noEmit
 pnpm exec next build --webpack
 pnpm exec tsup src/server.ts --format cjs --platform node --target node20 --outDir dist --no-splitting --no-minify
 pnpm test:gateway --next
+pnpm exec tsx scripts/test-phone-config.mjs --next
 ```
 
 集成测试使用本机临时 HTTPS 服务、每次生成的合成 CA/证书和假 Token，不调用真实云端。需要 OpenSSL；Windows 默认使用 Git 自带版本，可用 `OPENSSL_BIN` 指定。覆盖证书及 SAN 拒绝、固定目标、Bearer/密钥与 IP 清洗、10 MiB multipart、12/32 MiB 上限、重定向、超时和取消。测试证书不用于生产。
