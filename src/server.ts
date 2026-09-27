@@ -15,8 +15,9 @@ app.prepare().then(() => {
     try {
       const parsedUrl = parse(req.url!, true);
       await handle(req, res, parsedUrl);
-    } catch (err) {
-      console.error('Error occurred handling', req.url, err);
+    } catch {
+      // URLs, bodies and upstream error objects can contain account data.
+      console.error('Request handling failed');
       res.statusCode = 500;
       res.end('Internal server error');
     }
