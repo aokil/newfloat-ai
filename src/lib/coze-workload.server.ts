@@ -1,5 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { Client } from '@coze/workload-identity';
+import { diagnoseWorkloadEnvResponse } from './coze-workload-response-diagnostics.server';
+import type { WorkloadEnvResponseDiagnostics } from './coze-workload-response-diagnostics.server';
 
 const PROJECT_ID = '7689833705046130729';
 const FAILURE_COOLDOWN_MS = 10_000;
@@ -42,6 +44,9 @@ export type WorkloadRuntimeStatus = {
   businessCode: number | null;
   endpoints: Record<(typeof ENDPOINT_ENV)[number], EndpointFormat>;
   laneConfigured: boolean;
+  lane: { kind: 'none' | 'boe' | 'ppe' | 'custom'; hasOuterWhitespace: boolean;
+    clientMatchesCurrent: boolean | null };
+  responseDiagnostics?: WorkloadEnvResponseDiagnostics;
   resources: { database: boolean; phone: boolean; projectApiToken: boolean };
   productionBindingVerified: boolean;
 };
@@ -49,6 +54,9 @@ type SharedState = {
   identityHash?: string;
   phase?: Phase;
   client?: Client;
+  clientLane?: string;
+  responseProbeAttempted?: boolean;
+  responseDiagnostics?: WorkloadEnvResponseDiagnostics;
   resources?: WorkloadProjectResources;
   expiresAt: number;
   pending?: Promise<WorkloadProjectResources | null>;
@@ -73,7 +81,7 @@ const state = sharedGlobal[STATE_KEY] ??= {
 // constructing another Client cannot safely switch the cached workload identity.
 function identityFingerprint(): string {
   const identityEnvironment = [...REQUIRED_ENV, 'COZE_PROJECT_ID', 'COZE_PROJECT_ENV',
-    'COZE_API_TOKEN', 'COZE_WORKLOAD_IDENTITY_API_KEY'];
+    'COZE_API_TOKEN', 'COZE_WORKLOAD_IDENTITY_API_KEY', 'COZE_SERVER_ENV'];
   return createHash('sha256').update(JSON.stringify(identityEnvironment.map((name) =>
     [name, process.env[name] ?? null]))).digest('hex');
 }
@@ -112,6 +120,14 @@ function endpointFormat(value: string | undefined): EndpointFormat {
 function endpointFormats(): WorkloadRuntimeStatus['endpoints'] {
   return Object.fromEntries(ENDPOINT_ENV.map(name => [name, endpointFormat(process.env[name])])) as
     WorkloadRuntimeStatus['endpoints'];
+}
+
+function laneStatus(): WorkloadRuntimeStatus['lane'] {
+  const lane = process.env.COZE_SERVER_ENV ?? 'NONE';
+  const kind = !lane || lane === 'NONE' ? 'none' : lane.startsWith('boe_') ? 'boe' :
+    lane.startsWith('ppe_') ? 'ppe' : 'custom';
+  return { kind, hasOuterWhitespace: lane.trim() !== lane,
+    clientMatchesCurrent: state.client ? state.clientLane === lane : null };
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -289,11 +305,32 @@ export function workloadRuntimeStatus(): WorkloadRuntimeStatus {
     businessCode: permitted ? state.businessCode ?? null : null,
     endpoints: endpointFormats(),
     laneConfigured: Boolean(process.env.COZE_SERVER_ENV?.trim() && process.env.COZE_SERVER_ENV?.trim() !== 'NONE'),
+    lane: laneStatus(),
+    ...(permitted && state.responseDiagnostics ? { responseDiagnostics: { ...state.responseDiagnostics } } : {}),
     resources: { database: Boolean(resources?.databaseUrl), phone: Boolean(resources?.phoneConfiguration),
       projectApiToken: Boolean(resources?.projectApiToken) },
     productionBindingVerified: currentPhase === 'PROD' && state.stage === 'ready' &&
       resourceBindingsMatch(getInjectedProjectResources(), resources),
   };
+}
+
+/** Explicit protected diagnostics only. This response never supplies project resources. */
+export async function diagnoseWorkloadProjectEnvFailure(): Promise<void> {
+  const identityHash = identityFingerprint();
+  const allowed = (): boolean => phase() === 'PROD' && state.phase === 'PROD' &&
+    state.identityHash === identityHash && identityFingerprint() === identityHash &&
+    REQUIRED_ENV.every(name => Boolean(process.env[name]?.trim())) &&
+    state.clientLane === (process.env.COZE_SERVER_ENV ?? 'NONE') &&
+    state.stage === 'cooldown' && !state.pending && state.operation === 'project-env' &&
+    state.httpStatus === 400 && state.accessTokenVerified === true;
+  if (state.responseProbeAttempted || !state.client || !allowed() ||
+    state.operation !== 'project-env' || state.httpStatus !== 400 || state.accessTokenVerified !== true) return;
+  // No automatic HTTP retry or repeated sampling on subsequent status requests.
+  state.responseProbeAttempted = true;
+  const result = await diagnoseWorkloadEnvResponse({ client: state.client,
+    endpoint: process.env.COZE_OUTBOUND_AUTH_ENDPOINT ?? '', lane: state.clientLane,
+    contextStillMatches: allowed });
+  if (allowed()) state.responseDiagnostics = result;
 }
 
 /** Resolve only allowlisted resources supplied by the official workload client. */
@@ -322,7 +359,10 @@ export async function getWorkloadProjectResources(): Promise<WorkloadProjectReso
       try {
         if (phase() !== currentPhase || identityFingerprint() !== state.identityHash)
           throw new Error('WORKLOAD_RUNTIME_CONTEXT_CHANGED');
-        state.client ??= new Client({ timeoutMs: 10_000 });
+        if (!state.client) {
+          state.client = new Client({ timeoutMs: 10_000 });
+          state.clientLane = process.env.COZE_SERVER_ENV ?? 'NONE';
+        }
         state.operation = 'access-token';
         // Public SDK method, same Client/cache. Discard the token immediately;
         // project-env is not marked until this operation actually succeeds.

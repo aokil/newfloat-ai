@@ -6,7 +6,8 @@ import type { CozeModelMetadata } from '@/lib/coze-llm.server';
 import { cozeIntegrationFailure, cozeModelMetadataFailure, verifiedCozeProjectRuntimeContext,
   cozeRuntimeIdentityDiagnostics } from '@/lib/coze-llm.server';
 import type { CozeIntegrationFailure, CozeRuntimeIdentityDiagnostics } from '@/lib/coze-llm.server';
-import { getInjectedProjectResources, workloadRuntimeStatus } from '@/lib/coze-workload.server';
+import { diagnoseWorkloadProjectEnvFailure, getInjectedProjectResources,
+  workloadRuntimeStatus } from '@/lib/coze-workload.server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -170,6 +171,13 @@ export async function GET(request: Request): Promise<Response> {
     ({ config, credentialSource, runtimeIdentity } = await deadline(verifiedCozeProjectRuntimeContext(),
       Math.max(1, expiresAt - Date.now())));
   } catch (error: unknown) {
+    // Explicit owner diagnostics, after gateway authentication and genuine SDK failure.
+    // Keep sampling within the original status deadline; never authorize from its result.
+    if (knownEnvironment === 'PROD' && new URL(request.url).searchParams.get('workload-response') === '1' &&
+      expiresAt - Date.now() >= 2_100) {
+      try { await deadline(diagnoseWorkloadProjectEnvFailure(), Math.max(1, expiresAt - Date.now())); }
+      catch { /* Preserve the original unavailable result. */ }
+    }
     const code = error instanceof Error && error.message === 'STATUS_TIMEOUT' ? 'COZE_BACKEND_STATUS_TIMEOUT'
       : error instanceof Error && error.message === 'MODEL_AUTH_UNAVAILABLE' ? 'COZE_RUNTIME_AUTH_UNAVAILABLE'
       : 'PROJECT_IDENTITY_UNAVAILABLE';
