@@ -2,6 +2,16 @@
 
 Coze 承担同源 HTTPS 入口；题库后端、登录会话和 SQLite 数据保留在独立服务器。网页 HTML、脚本与样式直接来自题库服务，不在此复制业务。此仓库修改不代表已经公网部署或已接通短信。
 
+## DEV 预览
+
+Coze DEV 预览直接读取仓库 `question-bank/server/public/` 中已同步的 HTML、脚本、样式和六张头像，因此 Git Pull 后可看到当前页面，不会再被旧生产网页覆盖，也不需要为了显示页面填入上游密钥。
+
+仅 `COZE_PROJECT_ENV=DEV`，或非 PROD 的 Next development 运行启用该行为。只提供固定静态名单的 GET／HEAD，禁用缓存，使用正确 MIME；DEV 页面允许在 Coze 预览 iframe 中显示。API、健康检查及其他路径仍走原 HTTPS 网关，生产环境全部继续由原网关处理。
+
+预览静态页面不代表新后端已部署。登录和业务操作仍需要现有网关连接真实后端；旧服务暂不提供的新模型／资料接口会如实报错，不在预览中伪造账号、题目或收费结果。
+
+本地定向检查：`pnpm exec tsx scripts/test-preview-files.mjs`。它覆盖真实文件、HEAD、iframe 策略、生产回落、API／路径限制和缺文件状态，不访问生产或数据库。
+
 ## 环境变量
 
 在 Coze 的预览和生产环境分别配置三个 **服务端** 变量，示例见 `.env.example`。不要增加 `NEXT_PUBLIC_` 前缀，不要把实际密钥写入 Git。

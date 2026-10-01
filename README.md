@@ -13,6 +13,8 @@
 
 网站服务保存在独立的 `question-bank/server/` 目录；仓库根的 Next.js 项目继续承担 HTTPS 网关，运行参数见 [GATEWAY.md](GATEWAY.md)。源码不包含运行数据库、用户上传原件、真实环境凭据或安装包。
 
+Coze DEV 预览会直接读取已 Pull 的网站静态文件；生产与业务 API 继续走原网关。拉取后重启预览即可查看当前页面，业务功能是否可用仍取决于配套后端部署与真实配置。
+
 ## 原 Coze 模板说明
 
 这是一个基于 [Next.js 16](https://nextjs.org) + [shadcn/ui](https://ui.shadcn.com) 的全栈应用项目，由扣子编程 CLI 创建。
