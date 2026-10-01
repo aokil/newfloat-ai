@@ -1,0 +1,137 @@
+{
+  "projectId": "7689833705046130729",
+  "retrievedAt": "2026-10-01T07:46:35.782Z",
+  "source": "https://integration.coze.cn/api/v1/integration/llm/models/list",
+  "environments": {
+    "DEV": [
+      {
+        "model_id": "doubao-seed-2-0-pro-260215",
+        "model_name": "doubao-seed-2-0-pro",
+        "show_name": "Doubao-Seed-2.0-pro",
+        "model_desc": "旗舰级全能通用模型，面向 Agent 时代的复杂推理与长链路任务执行场景。强调多模态理解、长上下文推理、结构化生成与工具增强执行。复杂指令与多约束执行能力突出，可稳定应对多步复杂规划、复杂图文推理、视频内容理解与高难度分析等场景。",
+        "model_version": "260215"
+      },
+      {
+        "model_id": "doubao-seed-2-0-lite-260215",
+        "model_name": "doubao-seed-2-0-lite",
+        "show_name": "Doubao-Seed-2.0-lite",
+        "model_desc": "面向高频企业场景兼顾性能与成本的均衡型模型，综合能力超越上一代Doubao-Seed-1.8。胜任非结构化信息处理、内容创作、搜索推荐、数据分析等生产型工作，支持长上下文、多源信息融合、多步指令执行与高保真结构化输出。在保障稳定效果的同时显著优化成本。",
+        "model_version": "260215"
+      },
+      {
+        "model_id": "doubao-seed-2-0-mini-260215",
+        "model_name": "doubao-seed-2-0-mini",
+        "show_name": "Doubao-Seed-2.0-mini",
+        "model_desc": "面向低时延、高并发与成本敏感场景，强调快速响应与灵活推理部署。模型效果与Doubao-Seed-1.6相当。支持256k上下文、4档思考长度和多模态理解，适合成本和速度优先的轻量级任务。",
+        "model_version": "260215"
+      },
+      {
+        "model_id": "glm-5-0-260211",
+        "model_name": "glm-5-0",
+        "show_name": "GLM-5.0",
+        "model_desc": "GLM-5 是智谱新一代的旗舰基座模型，面向 Agentic Engineering 打造，能够在复杂系统工程与长程 Agent 任务中提供可靠生产力。",
+        "model_version": "260211"
+      },
+      {
+        "model_id": "glm-5-turbo-260316",
+        "model_name": "glm-5-turbo",
+        "show_name": "GLM-5-Turbo",
+        "model_desc": "面向OpenClaw龙虾场景深度优化的基座模型。",
+        "model_version": "260316"
+      },
+      {
+        "model_id": "glm-4-7-251222",
+        "model_name": "glm-4-7",
+        "show_name": "GLM-4.7",
+        "model_desc": "GLM-4.7 是智谱最新旗舰模型，更强的编程能力与更稳定的多步骤推理/执行能力。在执行复杂智能体任务提升明显，同时对话更自然，前端审美更好。",
+        "model_version": "251222"
+      },
+      {
+        "model_id": "minimax-m2-5-260212",
+        "model_name": "minimax-m2-5",
+        "show_name": "Minimax-M2.5",
+        "model_desc": "编码与智能体领域 SOTA，专为 Agent Universe 而设计。",
+        "model_version": "260212"
+      },
+      {
+        "model_id": "minimax-m2-7-260318",
+        "model_name": "minimax-m2-7",
+        "show_name": "Minimax-M2.7",
+        "model_desc": "自行构建复杂 Agent Harness, 完成高度复杂的生产力任务。",
+        "model_version": "260318"
+      },
+      {
+        "model_id": "qwen-3-5-plus-260215",
+        "model_name": "qwen-3-5-plus",
+        "show_name": "Qwen-3.5-plus",
+        "model_desc": "Qwen3.5原生视觉语言系列Plus模型，基于混合架构设计，融合了线性注意力机制与稀疏混合专家模型，实现了更高的推理效率。",
+        "model_version": "260212"
+      }
+    ],
+    "PROD": [
+      {
+        "model_id": "doubao-seed-2-0-pro-260215",
+        "model_name": "doubao-seed-2-0-pro",
+        "show_name": "Doubao-Seed-2.0-pro",
+        "model_desc": "旗舰级全能通用模型，面向 Agent 时代的复杂推理与长链路任务执行场景。强调多模态理解、长上下文推理、结构化生成与工具增强执行。复杂指令与多约束执行能力突出，可稳定应对多步复杂规划、复杂图文推理、视频内容理解与高难度分析等场景。",
+        "model_version": "260215"
+      },
+      {
+        "model_id": "doubao-seed-2-0-lite-260215",
+        "model_name": "doubao-seed-2-0-lite",
+        "show_name": "Doubao-Seed-2.0-lite",
+        "model_desc": "面向高频企业场景兼顾性能与成本的均衡型模型，综合能力超越上一代Doubao-Seed-1.8。胜任非结构化信息处理、内容创作、搜索推荐、数据分析等生产型工作，支持长上下文、多源信息融合、多步指令执行与高保真结构化输出。在保障稳定效果的同时显著优化成本。",
+        "model_version": "260215"
+      },
+      {
+        "model_id": "doubao-seed-2-0-mini-260215",
+        "model_name": "doubao-seed-2-0-mini",
+        "show_name": "Doubao-Seed-2.0-mini",
+        "model_desc": "面向低时延、高并发与成本敏感场景，强调快速响应与灵活推理部署。模型效果与Doubao-Seed-1.6相当。支持256k上下文、4档思考长度和多模态理解，适合成本和速度优先的轻量级任务。",
+        "model_version": "260215"
+      },
+      {
+        "model_id": "glm-5-0-260211",
+        "model_name": "glm-5-0",
+        "show_name": "GLM-5.0",
+        "model_desc": "GLM-5 是智谱新一代的旗舰基座模型，面向 Agentic Engineering 打造，能够在复杂系统工程与长程 Agent 任务中提供可靠生产力。",
+        "model_version": "260211"
+      },
+      {
+        "model_id": "glm-5-turbo-260316",
+        "model_name": "glm-5-turbo",
+        "show_name": "GLM-5-Turbo",
+        "model_desc": "面向OpenClaw龙虾场景深度优化的基座模型。",
+        "model_version": "260316"
+      },
+      {
+        "model_id": "glm-4-7-251222",
+        "model_name": "glm-4-7",
+        "show_name": "GLM-4.7",
+        "model_desc": "GLM-4.7 是智谱最新旗舰模型，更强的编程能力与更稳定的多步骤推理/执行能力。在执行复杂智能体任务提升明显，同时对话更自然，前端审美更好。",
+        "model_version": "251222"
+      },
+      {
+        "model_id": "minimax-m2-5-260212",
+        "model_name": "minimax-m2-5",
+        "show_name": "Minimax-M2.5",
+        "model_desc": "编码与智能体领域 SOTA，专为 Agent Universe 而设计。",
+        "model_version": "260212"
+      },
+      {
+        "model_id": "minimax-m2-7-260318",
+        "model_name": "minimax-m2-7",
+        "show_name": "Minimax-M2.7",
+        "model_desc": "自行构建复杂 Agent Harness, 完成高度复杂的生产力任务。",
+        "model_version": "260318"
+      },
+      {
+        "model_id": "qwen-3-5-plus-260215",
+        "model_name": "qwen-3-5-plus",
+        "show_name": "Qwen-3.5-plus",
+        "model_desc": "Qwen3.5原生视觉语言系列Plus模型，基于混合架构设计，融合了线性注意力机制与稀疏混合专家模型，实现了更高的推理效率。",
+        "model_version": "260212"
+      }
+    ]
+  }
+}

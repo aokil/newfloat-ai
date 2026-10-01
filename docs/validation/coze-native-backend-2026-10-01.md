@@ -2,6 +2,16 @@
 
 日期：2026-10-01；项目 `new float ai` / `7689833705046130729`。
 
+## 最新适配结果
+
+- 用户确认 Pull `b3ffe38` 后，07:35 UTC 新诊断运行；数据库失败在配置阶段，短信 API 业务码 `190000007`，模型目录 HTTP200 业务失败。未从业务码猜测具体原因。
+- 现有 CLI owner OAuth 只在本机内存使用，正式 DEV／PROD 模型目录均返回 9 个真实型号；保存无凭据目录快照 `src/lib/coze-project-models.json`。SDK `listModels()` 只支持新 user-OAuth 路径，不能把 workload token 回写成 `COZE_API_TOKEN`。
+- workload 兼容 Config 仅对受固定项目／DEV-PROD／cloud 保护的实例赋 `apiKey`，不改全局凭据；真实生成沿 SDK 正式流式调用。workload 目录明确 `owner-verified-snapshot`，更新时间可查询，连接测试前不启用型号。诊断 `generationVerified:false`，不把取得目录当作生成成功。
+- 加入官方 `@coze/workload-identity@0.1.0`；资源请求 single-flight、60 秒缓存、10 秒失败冷却，固定首次凭据身份。只读当前 phase 的 PG/TIYU Supabase 变量，不接通用数据库／短信地址；状态不输出凭据、URL或异常原文。
+- 正式 DEV database/ensure、supabase/ensure 已返回 code0。平台不允许自定义 `COZE_` 变量名，改保存 `PGDATABASE_URL_DEV`、`TIYU_SUPABASE_URL_DEV`、`TIYU_SUPABASE_ANON_KEY_DEV`，08:04 UTC 正式读取核对值一致。身份配置原始 `ProjectID` 保留大整数精度后匹配，手机号开关为 true；未发送短信。生产没有初始化或配置，DEV 成功不代表 PROD 就绪。
+- 没有把 owner OAuth 保存到环境、源码、文档、命令参数或本地文件；配置写入用官方 CLI HTTP 客户端内存结构化请求，未调用会打印值的 CLI env set。
+- 最终 TypeScript、受影响 ESLint、Next 完整构建及 Node24 入口打包全部通过，构建生成文件已恢复。没有新增／运行测试、模型生成、生产部署或手机操作。新适配须 Pull／重启后核验真实后台、短信和生成。
+
 ## 最新授权
 
 用户同意整个后台迁入 Coze，并明确舍弃旧账号和私人题库。方案改为初始化新库；没有删除旧服务器数据。SSH 一次性表单进程已关闭。首位管理员手机号仅配置在 Coze 环境，不写 Git 和文档；完成正常短信注册才授予角色。

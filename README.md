@@ -4,6 +4,8 @@
 
 ## 当前：Coze 原生后台 0.6.0
 
+2026-10-01 适配补丁：已通过本项目正式 owner 授权取得 DEV 数据库／短信资源，项目环境中保存 `PGDATABASE_URL_DEV`、`TIYU_SUPABASE_URL_DEV`、`TIYU_SUPABASE_ANON_KEY_DEV`，读回核对一致。不能使用平台禁止的自定义 `COZE_` 前缀。只读取当前 DEV／PROD 后缀；生产资源待独立配置。云端 workload 与 SDK 新 user-OAuth 路径存在兼容问题，模型执行使用受固定项目检查的 workload 实例，目录暂沿真实 owner 查询的 9 个型号快照并标记来源。没有部署 owner OAuth；真实生成仍须连接验证，快照不是实时目录或生成验收。
+
 用户授权全部后台迁入 Coze，舍弃旧账号和私人题库；初始化空库，不需要 SSH。唯一 HTTP 入口直接运行原 /v1 Fastify 业务，DEV／PROD 分别使用托管 PostgreSQL schema8，提供同一网站资源。
 
 指定手机号完成正常短信注册才成为首位管理员；内置模型须真实目录、绑定、测试及启用。Pull 后重启预览，/health 应显示 storage: postgres／schemaVersion: 8；生产须单独部署，Git 提交不代表已上线。见 [迁移记录](docs/validation/coze-native-backend-2026-10-01.md) 和 [部署说明](question-bank/server/DEPLOYMENT.md)。

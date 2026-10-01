@@ -1,6 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { Config, HeaderUtils, LLMClient, listModels } from 'coze-coding-dev-sdk';
 import type { LLMModelInfo, Message } from 'coze-coding-dev-sdk';
+import projectModelSnapshot from './coze-project-models.json';
 
 const PROJECT_ID = '7689833705046130729';
 const BRIDGE_PATH = '/internal/model-completion';
@@ -38,9 +39,11 @@ export type CozeTestResult = CompletionMetadata & { status: 'passed' };
 type SearchResult = CozeSearchResult;
 type TestResult = CozeTestResult;
 type CompletionResult = SearchResult | TestResult;
-type ProjectContext = { config: Config; environment: ProjectEnvironment };
+type ProjectContext = { config: Config; environment: ProjectEnvironment;
+  credentialSource: 'workload-token' | 'project-token' };
 type ModelCache = { expiresAt: number; items: LLMModelInfo[] };
-export type CozeModelMetadata = { projectId: string; environment: ProjectEnvironment; items: LLMModelInfo[] };
+export type CozeModelMetadata = { projectId: string; environment: ProjectEnvironment; items: LLMModelInfo[];
+  source: 'live-sdk' | 'owner-verified-snapshot'; retrievedAt: string | null };
 export type CozeModelExecutionContext = { headers?: Headers | Record<string, string>; signal?: AbortSignal };
 export type CozeCompletionEnvelope = { projectId: string; environment: ProjectEnvironment;
   requestId: string; result: CompletionResult };
@@ -190,30 +193,38 @@ async function readRawBody(request: Request): Promise<Uint8Array> {
   return result;
 }
 
-function projectContext(): ProjectContext {
+// Coze's current cloud workload identity uses the SDK's legacy integration
+// headers. Keep the fixed-project/cloud checks outside this compatibility hook.
+class WorkloadConfig extends Config {
+  override usesUserRuntimeAuth(): boolean { return false; }
+}
+
+export function cozeProjectRuntimeContext(): ProjectContext {
   const environment = process.env.COZE_PROJECT_ENV;
   if (process.env.COZE_PROJECT_ID !== PROJECT_ID || (environment !== 'DEV' && environment !== 'PROD') ||
     !process.env.COZE_DEVBOX_ENV?.trim()) {
     throw new BridgeError(503, 'PROJECT_IDENTITY_UNAVAILABLE', '模型项目身份尚未就绪');
   }
   try {
-    // SDK 0.7.32 recognizes workload credentials only outside project mode, and
-    // listModels() only reads COZE_API_TOKEN. Alias the platform-injected identity
-    // in memory after the fixed cloud-project gate; never persist or replace it.
     const suppliedProjectToken = process.env.COZE_API_TOKEN?.trim();
     const suppliedWorkloadToken = process.env.COZE_WORKLOAD_IDENTITY_API_KEY?.trim();
-    if (!suppliedProjectToken && suppliedWorkloadToken) process.env.COZE_API_TOKEN = suppliedWorkloadToken;
     const projectToken = suppliedProjectToken || suppliedWorkloadToken;
     if (!projectToken) throw new BridgeError(503, 'MODEL_AUTH_UNAVAILABLE', '内置模型授权尚未就绪');
-    const config = new Config();
+    const credentialSource = suppliedProjectToken && suppliedProjectToken !== suppliedWorkloadToken
+      ? 'project-token' : 'workload-token';
+    const options = { apiKey: projectToken, timeout: 10_000, retryTimes: 0 };
+    const config = credentialSource === 'workload-token' ? new WorkloadConfig(options) : new Config(options);
+    // SDK 0.7.32 ignores options.apiKey when .coze project metadata exists.
+    // Set its public field only on this guarded cloud instance, never process.env.
+    config.apiKey = projectToken;
     config.validate();
     // Config can otherwise prefer a desktop personal credential even with project metadata.
     // The execution bridge only accepts the token supplied to this Coze cloud project runtime.
     if (config.apiKey !== projectToken || config.runtimePlatform !== 'cloud' ||
-      config.projectId !== PROJECT_ID || !config.usesUserRuntimeAuth()) {
+      config.projectId !== PROJECT_ID || config.usesUserRuntimeAuth() !== (credentialSource === 'project-token')) {
       throw new BridgeError(503, 'PROJECT_IDENTITY_UNAVAILABLE', '模型项目身份尚未就绪');
     }
-    return { config, environment };
+    return { config, environment, credentialSource };
   } catch (error: unknown) {
     if (error instanceof BridgeError) throw error;
     throw new BridgeError(503, 'MODEL_AUTH_UNAVAILABLE', '内置模型授权尚未就绪');
@@ -223,7 +234,7 @@ function projectContext(): ProjectContext {
 /** Configuration readiness only; actual model availability still requires SDK metadata/test. */
 export function cozeProjectModelsReady(): boolean {
   try {
-    projectContext();
+    cozeProjectRuntimeContext();
     return true;
   } catch {
     return false;
@@ -256,7 +267,18 @@ function normalizeModels(value: unknown): LLMModelInfo[] {
   return models;
 }
 
-async function availableModels(expiresAt: number): Promise<LLMModelInfo[]> {
+async function availableModels(context: ProjectContext, expiresAt: number): Promise<LLMModelInfo[]> {
+  if (context.credentialSource === 'workload-token') {
+    // The user-OAuth-only listModels endpoint rejects workload credentials.
+    // These IDs were read from that project's real DEV and PROD directories
+    // using the existing owner login; no owner credential is shipped here.
+    // A catalog entry alone never enables a model: admin connection tests remain required.
+    if (projectModelSnapshot.projectId !== PROJECT_ID ||
+      !Number.isFinite(Date.parse(projectModelSnapshot.retrievedAt))) {
+      throw new BridgeError(503, 'MODEL_LIST_UNAVAILABLE', '暂时无法读取可用模型');
+    }
+    return normalizeModels(projectModelSnapshot.environments[context.environment]);
+  }
   if (modelCache && modelCache.expiresAt > Date.now()) return modelCache.items;
   if (!modelFetch) {
     // SDK listModels has no AbortSignal argument. Keep one in-flight request even after a caller deadline.
@@ -455,13 +477,15 @@ async function complete(context: ProjectContext, request: CozeModelExecutionCont
 
 /** Fixed-project SDK metadata shared by the native account server and HMAC route. */
 export async function cozeProjectModelMetadata(): Promise<CozeModelMetadata> {
-  const context = projectContext();
+  const context = cozeProjectRuntimeContext();
   // Do not expose the cache used as the execution allowlist to mutable native consumers.
-  const items = (await availableModels(Date.now() + MODEL_DEADLINE_MS)).map(item => ({ ...item,
+  const items = (await availableModels(context, Date.now() + MODEL_DEADLINE_MS)).map(item => ({ ...item,
     ...(item.input_types ? { input_types: [...item.input_types] } : {}),
     ...(item.output_types ? { output_types: [...item.output_types] } : {}),
   }));
-  const result = { projectId: PROJECT_ID, environment: context.environment, items };
+  const result: CozeModelMetadata = { projectId: PROJECT_ID, environment: context.environment, items,
+    source: context.credentialSource === 'workload-token' ? 'owner-verified-snapshot' : 'live-sdk',
+    retrievedAt: context.credentialSource === 'workload-token' ? projectModelSnapshot.retrievedAt : null };
   serializedPayload(result);
   return result;
 }
@@ -470,11 +494,11 @@ export async function cozeProjectModelMetadata(): Promise<CozeModelMetadata> {
 export async function cozeProjectModelCompletion(input: unknown,
   executionContext: CozeModelExecutionContext = {}): Promise<CozeCompletionEnvelope> {
   try {
-    const context = projectContext();
+    const context = cozeProjectRuntimeContext();
     const startedAt = Date.now();
     const body = validateCompletionBody(input);
     const expiresAt = startedAt + body.timeoutMs;
-    const models = await availableModels(expiresAt);
+    const models = await availableModels(context, expiresAt);
     if (!models.some(model => model.model_id === body.modelId)) {
       throw new BridgeError(400, 'MODEL_NOT_AVAILABLE', '所选模型未在当前项目中开放');
     }

@@ -3,8 +3,9 @@ import { Config, HeaderUtils, SupabaseClient } from 'coze-coding-dev-sdk';
 import { getNativeBackend, nativeBackendFailure } from '@/lib/native-backend.server';
 import { nativeModelBridge } from '@/lib/native-model-bridge.server';
 import type { CozeModelMetadata } from '@/lib/coze-llm.server';
-import { cozeIntegrationFailure, cozeModelMetadataFailure } from '@/lib/coze-llm.server';
+import { cozeIntegrationFailure, cozeModelMetadataFailure, cozeProjectRuntimeContext } from '@/lib/coze-llm.server';
 import type { CozeIntegrationFailure } from '@/lib/coze-llm.server';
+import { getInjectedProjectResources, workloadRuntimeStatus } from '@/lib/coze-workload.server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -27,14 +28,18 @@ type BackendStatus = { ready: boolean; code: string | null; status: 'ok' | null;
   initialization?: ReturnType<typeof nativeBackendFailure> };
 type BackendProbe = { status: BackendStatus; phoneReady: boolean };
 type ModelsStatus = { ready: boolean; code: string | null; items: CozeModelMetadata['items'];
+  source?: CozeModelMetadata['source']; retrievedAt?: string | null;
+  generationVerified?: false;
   diagnostics?: CozeIntegrationFailure | null };
 type PhoneStatus = { ready: boolean; code: string | null; backendReady: boolean;
   phone_enabled_supported: boolean; phone_enabled: boolean | null;
   diagnostics?: CozeIntegrationFailure | { stage: string; businessCode: number } };
 type StatusPayload = { projectId: string; environment: Environment | null; ready: boolean;
   identity: { ready: boolean; code: string | null; runtimePlatform: 'cloud' | null;
-    credentialSource?: 'workload-token' | 'project-token'; scopedDatabaseInjected?: boolean };
-  backend: BackendStatus; models: ModelsStatus; phone: PhoneStatus };
+    credentialSource?: 'workload-token' | 'project-token'; scopedDatabaseInjected?: boolean;
+    scopedPhoneInjected?: boolean };
+  backend: BackendStatus; models: ModelsStatus; phone: PhoneStatus;
+  workload?: ReturnType<typeof workloadRuntimeStatus> };
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -117,7 +122,8 @@ async function modelsStatus(): Promise<ModelsStatus> {
     if (metadata.projectId !== PROJECT_ID || metadata.environment !== process.env.COZE_PROJECT_ENV || !metadata.items.length) {
       return { ready: false, code: 'PROJECT_IDENTITY_UNAVAILABLE', items: [] };
     }
-    return { ready: true, code: null, items: metadata.items };
+    return { ready: true, code: null, items: metadata.items, source: metadata.source,
+      retrievedAt: metadata.retrievedAt, generationVerified: false };
   } catch (error: unknown) {
     const allowed = new Set(['PROJECT_IDENTITY_UNAVAILABLE', 'COZE_INTEGRATION_NOT_READY',
       'COZE_MODEL_LIST_UNAVAILABLE', 'PROVIDER_RESPONSE_TOO_LARGE']);
@@ -134,6 +140,8 @@ async function phoneStatus(config: Config, request: Request): Promise<PhoneStatu
     const auth = await deadline(client.getAuthConfigV2(), 12_000);
     if (auth.code !== 0 || !auth.config) return typeof auth.code === 'number' && Number.isSafeInteger(auth.code)
       ? { ...result, diagnostics: { stage: 'phone-configuration', businessCode: auth.code } } : result;
+    // The SDK normalizes this ID from Config. This is a context sanity check,
+    // not an independent assertion about the upstream resource's ownership.
     if (auth.config.project_id !== PROJECT_ID) return { ...result, code: 'PROJECT_IDENTITY_UNAVAILABLE' };
     const enabled: unknown = auth.config.phone_config?.external_phone_enabled;
     if (typeof enabled !== 'boolean') return { ...result, code: 'PHONE_AUTH_CONFIG_UNSUPPORTED' };
@@ -150,17 +158,12 @@ export async function GET(request: Request): Promise<Response> {
   const environment = process.env.COZE_PROJECT_ENV;
   const knownEnvironment = environment === 'DEV' || environment === 'PROD' ? environment : null;
   let config: Config;
+  let credentialSource: 'workload-token' | 'project-token';
   try {
     if (process.env.COZE_PROJECT_ID !== PROJECT_ID || knownEnvironment === null || !nativeModelBridge().ready) {
       return response(unavailable('PROJECT_IDENTITY_UNAVAILABLE', knownEnvironment));
     }
-    config = new Config({ timeout: 10_000, retryTimes: 0 });
-    config.validate();
-    const injectedToken = process.env.COZE_API_TOKEN?.trim() || process.env.COZE_WORKLOAD_IDENTITY_API_KEY?.trim();
-    if (!injectedToken || config.apiKey !== injectedToken || config.projectId !== PROJECT_ID ||
-      config.runtimePlatform !== 'cloud' || !config.usesUserRuntimeAuth()) {
-      return response(unavailable('PROJECT_IDENTITY_UNAVAILABLE', knownEnvironment));
-    }
+    ({ config, credentialSource } = cozeProjectRuntimeContext());
   } catch {
     return response(unavailable('PROJECT_IDENTITY_UNAVAILABLE', knownEnvironment));
   }
@@ -173,10 +176,10 @@ export async function GET(request: Request): Promise<Response> {
   return response({ projectId: PROJECT_ID, environment: knownEnvironment,
     ready: backend.status.ready && models.ready && phone.ready,
     identity: { ready: true, code: null, runtimePlatform: 'cloud',
-      credentialSource: process.env.COZE_API_TOKEN === process.env.COZE_WORKLOAD_IDENTITY_API_KEY
-        ? 'workload-token' : 'project-token',
-      scopedDatabaseInjected: Boolean(process.env[`PGDATABASE_URL_${knownEnvironment}`]) },
-    backend: backend.status, models, phone });
+      credentialSource,
+      scopedDatabaseInjected: Boolean(getInjectedProjectResources()?.databaseUrl),
+      scopedPhoneInjected: Boolean(getInjectedProjectResources()?.phoneConfiguration) },
+    backend: backend.status, models, phone, workload: workloadRuntimeStatus() });
 }
 
 /** Avoid Next's automatic HEAD-to-GET fallback starting resource lookups. */

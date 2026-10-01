@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { ensureDatabaseEnvironment, ensureSupabaseEnvironment } from 'coze-coding-dev-sdk';
 import type { SupabaseEnvironment } from 'coze-coding-dev-sdk';
 import { nativeModelBridge } from './native-model-bridge.server';
+import { getInjectedProjectResources, getWorkloadProjectResources } from './coze-workload.server';
 
 const PROJECT_ID = '7689833705046130729';
 const STATE_KEY = Symbol.for('float-ai.native-backend.7689833705046130729.v1');
@@ -55,19 +56,27 @@ export function getNativeBackend(): Promise<FastifyInstance> {
     if (process.env.COZE_PROJECT_ID !== PROJECT_ID || !['DEV', 'PROD'].includes(process.env.COZE_PROJECT_ENV || ''))
       throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     const bridge = nativeModelBridge();
-    // Normalize the SDK-supported platform token before database/Auth SDK setup.
+    // Validate the platform identity without mutating global SDK credentials.
     if (!bridge.ready) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
+    const injectedResources = getInjectedProjectResources();
+    stage = 'workload-resources';
+    const workloadResources = injectedResources?.databaseUrl && injectedResources.phoneConfiguration
+      ? null : await getWorkloadProjectResources();
     stage = 'database-configuration';
     // SDK 0.7.32 checks .env only; Coze may inject the scoped URL into the
     // process instead. Prefer that official DEV/PROD variable before ensuring.
-    const injectedDatabaseUrl = process.env[`PGDATABASE_URL_${process.env.COZE_PROJECT_ENV}`];
+    const injectedDatabaseUrl = injectedResources?.databaseUrl ||
+      workloadResources?.databaseUrl;
     const database = injectedDatabaseUrl
       ? { databaseUrl: injectedDatabaseUrl, context: { projectId: PROJECT_ID } }
       : await ensureDatabaseEnvironment();
     if (database.context.projectId !== PROJECT_ID) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     // Authentication may be temporarily unavailable; the website and database
     // remain usable, while SMS APIs return their genuine unavailable state.
-    const phone = await ensureSupabaseEnvironment().catch(() => undefined);
+    const phoneConfiguration = injectedResources?.phoneConfiguration || workloadResources?.phoneConfiguration;
+    const phone = phoneConfiguration
+      ? { ...phoneConfiguration, context: { root: process.cwd(), projectId: PROJECT_ID } }
+      : await ensureSupabaseEnvironment().catch(() => undefined);
     if (phone && phone.context.projectId !== PROJECT_ID) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     // Keep the existing ESM backend unbundled: parser workers and public files
     // resolve their own import.meta.url in both preview and production.
