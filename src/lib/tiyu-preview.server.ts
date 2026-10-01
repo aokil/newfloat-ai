@@ -24,9 +24,9 @@ const ASSETS: ReadonlyMap<string, PreviewAsset> = new Map([
   ['/assets/model-icons-license.txt', { file: 'assets/model-icons-license.txt', contentType: 'text/plain; charset=utf-8' }],
 ]);
 
-// Coze embeds DEV previews in an iframe. All other directives match the website
-// policy; PROD responses (including frame-ancestors) remain owned by the gateway.
-const PREVIEW_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'";
+// Coze embeds DEV previews and injects its editor/console/history bridge scripts.
+// Allow that fixed HTTPS CDN only in DEV; PROD policy is owned by the gateway.
+const PREVIEW_CSP = "default-src 'self'; script-src 'self' https://lf-cdn.coze.cn; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'";
 
 /** Serve the committed website for DEV previews without starting its backend. */
 export function createPreviewFileServer(

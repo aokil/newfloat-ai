@@ -39,7 +39,8 @@ await test('DEV reads the real committed page and all resources without upstream
   }
   const root = await dev(request('/'));
   const csp = root.headers.get('content-security-policy');
-  assert.match(csp, /script-src 'self'/);
+  assert.match(csp, /script-src 'self' https:\/\/lf-cdn\.coze\.cn;/);
+  assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval|\*\.coze\.cn/);
   assert.match(csp, /object-src 'none'/);
   assert.doesNotMatch(csp, /frame-ancestors/);
   assert.equal(root.headers.get('x-frame-options'), null);
