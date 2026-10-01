@@ -21,7 +21,7 @@ export function configuredCatalog(store) {
     if(!catalogEntry(config.catalogKey))continue;
     // Conflicting legacy/manual rows fail closed instead of picking a model.
     if(configured.has(config.catalogKey))configured.set(config.catalogKey,null);
-    else configured.set(config.catalogKey,{row,config});
+    else configured.set(config.catalogKey,{row,config,bridgeReady:store.cozeBridgeReady?.()===true});
   }
   return configured;
 }
@@ -30,7 +30,13 @@ export function modelUnavailableReason(item,binding) {
   if(!binding)return 'MODEL_NOT_CONFIGURED';
   const {row,config}=binding;
   if(config.provider!==item.provider||config.pointsPerCall!==item.pointsPerCall)return 'MODEL_CONFIG_MISMATCH';
-  if(!row.encrypted_key)return 'MODEL_KEY_NOT_CONFIGURED';
+  if(config.execution==='coze'){
+    if(config.baseUrl!==null||row.encrypted_key)return 'MODEL_CONFIG_MISMATCH';
+    if(!binding.bridgeReady)return 'COZE_INTEGRATION_NOT_READY';
+  }else{
+    if(config.execution!==undefined&&config.execution!=='official')return 'MODEL_CONFIG_MISMATCH';
+    if(!row.encrypted_key)return 'MODEL_KEY_NOT_CONFIGURED';
+  }
   if(row.last_test_status!=='passed')return 'MODEL_NOT_VERIFIED';
   if(!config.enabled)return 'MODEL_DISABLED';
   return null;

@@ -1,4 +1,4 @@
-param([ValidatePattern('^[a-zA-Z0-9._-]+$')][string]$Version = 'm3', [ValidateSet('m2','m3','m4','m5','m5.1','m6','m7','m8')][string]$Milestone = 'm3')
+param([ValidatePattern('^[a-zA-Z0-9._-]+$')][string]$Version = 'm3', [ValidateSet('m2','m3','m4','m5','m5.1','m6','m7','m8','m8.1')][string]$Milestone = 'm3')
 $ErrorActionPreference = 'Stop'
 $serverRoot = $PSScriptRoot
 $bankRoot = Split-Path -Parent $serverRoot

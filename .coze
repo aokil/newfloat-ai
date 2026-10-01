@@ -1,4 +1,5 @@
 [project]
+project_id = "7689833705046130729"
 requires = [ "nodejs-24" ]
 project_type = "web"
 template = "nextjs"

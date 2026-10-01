@@ -50,8 +50,11 @@ function indexedQuestions(payload) {
   });
   return {questions,typeCounts:{...counts}};
 }
-export async function buildApp({database=':memory:',logger=false,rateLimits=true,smsTransport=null,smsHmacKey=null,smsLimits=true,phoneVerifier=null,testHooks={},modelMasterKey=null,modelTransport,aiTransport,appUpdateDirectory=null}={}) {
+export async function buildApp({database=':memory:',logger=false,rateLimits=true,smsTransport=null,smsHmacKey=null,smsLimits=true,phoneVerifier=null,testHooks={},modelMasterKey=null,modelTransport,aiTransport,cozeBridge=null,appUpdateDirectory=null}={}) {
   const store=new Store(database);
+  // Runtime readiness is shared with catalog/account checks; no credentials or
+  // execution configuration are copied into the account database.
+  Object.defineProperty(store,'cozeBridgeReady',{value:()=>cozeBridge?.ready===true&&['metadata','test','search'].every(method=>typeof cozeBridge[method]==='function')});
   for(const pending of store.all("SELECT id,model_id,actor_id FROM model_tests WHERE status='pending'"))store.transaction(()=>{
     const result=JSON.stringify({testId:pending.id,status:'uncertain',errorCode:'PROCESS_INTERRUPTED'});
     store.run("UPDATE model_tests SET status='uncertain',result=? WHERE id=?",result,pending.id);
@@ -471,8 +474,8 @@ export async function buildApp({database=':memory:',logger=false,rateLimits=true
       store.audit(req.auth.user_id,'withdraw',release.id);return {releaseId:release.id,status:'withdrawn'};
     });
   });
-  adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,modelTransport});
-  aiRoutes(app,{store,auth,modelMasterKey,aiTransport,rateLimits});
+  adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,modelTransport,cozeBridge});
+  aiRoutes(app,{store,auth,modelMasterKey,aiTransport,cozeBridge,rateLimits});
   registerAppUpdateRoutes(app,{directory:appUpdateDirectory});
   await app.register(staticFiles,{root:fileURLToPath(new URL('../public/',import.meta.url)),prefix:'/',index:['index.html'],dotfiles:'deny'});
   return app;

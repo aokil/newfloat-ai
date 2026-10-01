@@ -1,6 +1,14 @@
 # 题屿 Coze 入口
 
-Coze 承担同源 HTTPS 入口；题库后端、登录会话和 SQLite 数据保留在独立服务器。网页 HTML、脚本与样式直接来自题库服务，不在此复制业务。此仓库修改不代表已经公网部署或已接通短信。
+Coze 承担同源 HTTPS 入口和项目内置模型生成；题库后端、登录会话、点数结算和 SQLite 数据保留在独立服务器。网页 HTML、脚本与样式来自题库服务（DEV 可读取当前仓库文件）。此仓库修改不代表已经公网部署或已接通模型。
+
+## 内置模型执行桥
+
+`GET/POST /internal/model-completion` 是账号服务器专用路由，不允许浏览器或 APK 直接调用。请求按 method、固定路径、timestamp、nonce 和原始 body SHA256 做 HMAC；未知／无效签名返回 404，时间窗 60 秒，nonce 防重放。桥 Key 可从已有网关 Key 以域分离标签派生，或两端单独提供 `TIYU_LLM_BRIDGE_KEY`，不得输出／公开。
+
+`.coze` 固定 project_id 为 `7689833705046130729`；运行时同时核对平台项目 ID、DEV／PROD、cloud 平台及 `COZE_API_TOKEN` 与 SDK Config 一致。拒绝桌面个人 PAT 回退。GET 返回 SDK 实际模型目录（60 秒缓存），POST 只接受固定答题／OK 检查模式，聚合真实 `stream()` 输出与用量。不存在的实际 ID、无有效用量／不完整／超预算都失败。没有任意消息代理、模型地址或用户凭据接口。
+
+SDK 不提供公开硬取消或供应商 token 上限；25 秒仅是交付期限，返回 token 超预算后失败仍可能已消耗平台资源。每进程最多 4 个真实生成，占位直到原流退出，应用不自动重发。读取目录不生成答案；配置管理与启用仍需配套 0.5.1 后端。详细部署见 `question-bank/server/DEPLOYMENT.md`。
 
 ## DEV 预览
 

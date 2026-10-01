@@ -1,5 +1,21 @@
 # M8 服务部署与运行
 
+## Coze 内置模型候选（2026-10-01）
+
+本轮在现有 schema8 上增加 Coze 执行桥，无新增数据库迁移。源码完成不等于已接通生产模型；没有自动写入模型配置或真实调用。现有 Android v41 可沿用相同模型接口，无需把项目令牌或桥密钥放进 APK。
+
+上线准备顺序：
+
+1. 将新提交 Pull 到既有 Coze `new float ai` 项目，重启 DEV 预览。`.coze` 固定项目 ID，运行时应提供同项目 `COZE_PROJECT_ID`、`COZE_PROJECT_ENV` 和平台项目授权。SDK 不回退成个人 PAT 的直接 API 模式。
+2. 先验证 DEV 只读模型目录；使用既有服务器 `/etc/tiyu/edge.env` 中的网关 Key 在内存签名，可运行工具 `tools/ssh-control/configure-coze-models.mjs --dev --check`。它只读目录，不生成答案、不更改环境／账户／模型数据。不应在本地造平台凭据冒充 Coze 运行时。
+3. 经用户明确授权部署 Coze 后，确认固定生产源 `https://d635c6m6jj.coze.site` 的元数据与项目和 PROD 环境一致。执行 `configure-coze-models.mjs --check` 只读检查；`--write` 只会新建 `/etc/tiyu/coze-models.env`（0600），拒绝覆盖现有文件，不自动重启服务。
+4. 备份现有数据库、部署配套账号服务和网页，并让服务读取上述环境文件。需要 `COZE_LLM_ORIGIN`、`COZE_LLM_ENVIRONMENT=PROD` 和服务端桥密钥；个人供应商 Key 和 `MODEL_MASTER_KEY` 不用于 Coze 执行。官方 API／BYOK 模式仍沿原配置。
+5. 管理页选择“Coze 内置集成”，读取真实型号，绑定 1／2 点产品档位，核对实际名称。保存后明确点“发送一次测试”；它可能消耗已有 Coze 资源，不扣普通用户点数。实际通过再启用，不自动开通全部型号、不充值资源。
+
+DEV 后端不得指向 PROD、PROD 后端不得指向 DEV。桥只接受已核对的固定生产主机或 UUID.dev.coze.site 预览主机，不支持任意 URL、重定向或客户端自带地址。详细协议与 SDK 超时／输出预算限制见 [Coze 模型执行协议](../../contracts/points-models-v1.md#coze-项目内置模型执行2026-10-01)。
+
+以下为已有 0.5.0 候选说明；实际产物和未完成步骤以项目现状为准。
+
 2026-10-01 当前本地候选为 **0.5.0 / SQLite schema8**，配套 Android v41。新包包含点数权限、模型目录与 AI 幂等结算、个人头像／昵称、题卡复审与新版网页。生产尚未升级，仍以 `docs/CURRENT_STATE.md` 记录为准。
 
 ## 本轮上线顺序与配置

@@ -79,7 +79,8 @@ window.FloatWorkspace = function (ctx) {
       priceTable(),
       el('p', {}, '按每次模型调用计算。剩余 1 点时，可以使用基础功能和 1 点模型；调用 2 点模型需要至少 2 点。'),
       el('p', {}, el('strong', {}, '自带 API Key 不扣平台点数。'), '例如自行接入 DeepSeek，费用由相应模型服务商结算。基础功能仍要求账户可用点数大于 0。'),
-      el('p', {class: 'muted'}, '模型是否可用以模型选择页为准。尚未配置或暂时停用的模型不会发起调用。'));
+      el('p', {}, '内置模型可由 Coze 项目集成提供，无需你填写供应商 Key；仍按成功调用的 1／2 点档位结算。可用型号与实际名称以模型选择页为准。'),
+      el('p', {class: 'muted'}, '未配置、测试未通过或暂时停用的模型不会发起调用。请求失败不扣平台点数；超时后先找回结果，避免重复发送。'));
   }
   async function profilePage(alive) {
     loadPreferences();

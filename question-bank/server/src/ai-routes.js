@@ -10,17 +10,23 @@ const ERROR_MESSAGES={
   EMPTY_RESPONSE:'模型未返回有效答案，本次未扣平台点数',TRUNCATED_RESPONSE:'模型答案未生成完整，本次未扣平台点数',
   INCOMPLETE_RESPONSE:'模型未完成回答，本次未扣平台点数',USAGE_MISSING:'模型未返回完整调用凭据，本次未扣平台点数',
   INVALID_ANSWER:'模型答案格式无效，本次未扣平台点数',INVALID_PROVIDER_RESPONSE:'模型响应格式无效，本次未扣平台点数',
-  PROVIDER_RESPONSE_TOO_LARGE:'模型响应超出处理范围，本次未扣平台点数',PROCESS_INTERRUPTED:'模型请求已中断，本次未扣平台点数'
+  PROVIDER_RESPONSE_TOO_LARGE:'模型响应超出处理范围，本次未扣平台点数',PROCESS_INTERRUPTED:'模型请求已中断，本次未扣平台点数',
+  COZE_INTEGRATION_NOT_READY:'Coze 模型集成当前未就绪，本次未扣平台点数',
+  COZE_MODEL_LIST_UNAVAILABLE:'Coze 模型目录当前不可用，本次未扣平台点数',
+  COZE_MODEL_UNAVAILABLE:'所选 Coze 模型当前不可用，本次未扣平台点数',
+  PROJECT_IDENTITY_UNAVAILABLE:'Coze 项目身份当前不可用，本次未扣平台点数'
 };
 const masterConfigured=value=>{try{return Buffer.from(value||'','base64').length===32;}catch{return false;}};
 function keyUsable(binding,master){
-  if(!binding||!masterConfigured(master))return false;
+  if(!binding)return false;
+  if(binding.config.execution==='coze')return binding.bridgeReady===true;
+  if(!masterConfigured(master))return false;
   try{const key=openKey(binding.row.encrypted_key,master);return typeof key==='string'&&key.length>=8&&!/[\r\n]/u.test(key);}catch{return false;}
 }
 function providerError(error){
   if(error instanceof ApiError)return error;
   const code=Object.hasOwn(ERROR_MESSAGES,error?.message)?error.message:/^PROVIDER_HTTP_\d{3}$/u.test(error?.message||'')?error.message:'PROVIDER_FAILED';
-  return new ApiError(code==='PROVIDER_RATE_LIMITED'?429:502,code,ERROR_MESSAGES[code]||'模型调用失败，本次未扣平台点数');
+  return new ApiError(code==='PROVIDER_RATE_LIMITED'?429:['COZE_INTEGRATION_NOT_READY','COZE_MODEL_LIST_UNAVAILABLE','COZE_MODEL_UNAVAILABLE','PROJECT_IDENTITY_UNAVAILABLE'].includes(code)?503:502,code,ERROR_MESSAGES[code]||'模型调用失败，本次未扣平台点数');
 }
 function releaseFailed(store,row,error){
   const fresh=store.get('SELECT * FROM ai_requests WHERE id=?',row.id);
@@ -47,7 +53,7 @@ function validateReceipt(result){
   return {answer:result.answer,explanation:result.explanation,usage:{prompt_tokens:result.usage.prompt_tokens,completion_tokens:result.usage.completion_tokens,total_tokens:result.usage.total_tokens}};
 }
 
-export function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=officialModelSearch,rateLimits=true}){
+export function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=officialModelSearch,cozeBridge=null,rateLimits=true}){
   recoverExpired(store);
   const recovery=setInterval(()=>{try{recoverExpired(store);}catch{app.log.error({code:'AI_RECOVERY_FAILED'},'AI reservation recovery failed');}},15000);
   recovery.unref();app.addHook('onClose',async()=>clearInterval(recovery));
@@ -57,7 +63,7 @@ export function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=officialMode
     const items=MODEL_CATALOG.map(item=>{
       const binding=bindings.get(item.key);
       const reason=modelUnavailableReason(item,binding)||(!keyUsable(binding,modelMasterKey)?'MODEL_KEY_NOT_CONFIGURED':null)||(available<item.pointsPerCall?'INSUFFICIENT_POINTS':null);
-      return {...item,configured:!!binding,available:!reason,unavailableReason:reason};
+      return {...item,name:binding?.config.execution==='coze'?binding.config.displayName:item.name,configured:!!binding,available:!reason,unavailableReason:reason};
     });
     return {items,byokProviders:BYOK_PROVIDERS,pointsAvailable:available,policy:{basicRequiresPositivePoints:true,basicPointsPerUse:0,byokPointsPerCall:0}};
   });
@@ -96,14 +102,15 @@ export function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=officialMode
         let row=null,cost=0;
         if(mode==='builtin'){
           const binding=configuredCatalog(store).get(product.key),reason=modelUnavailableReason(product,binding);
-          if(reason||!masterConfigured(modelMasterKey))throw new ApiError(503,'MODEL_UNAVAILABLE','该内置模型尚未配置、验证或启用，请选择其他模型');
+          if(reason||!keyUsable(binding,modelMasterKey))throw new ApiError(503,'MODEL_UNAVAILABLE','该内置模型尚未配置、验证或启用，请选择其他模型');
           row=binding.row;config=binding.config;cost=product.pointsPerCall;
           if(user.points_balance-user.points_reserved<cost)throw new ApiError(402,'INSUFFICIENT_POINTS',`该模型每次需要${cost}点，可用点数不足`);
           const count=store.get('SELECT COUNT(*) AS n FROM ai_requests WHERE model_id=? AND created_at>?',row.id,now-86400000).n+
             store.get('SELECT COUNT(*) AS n FROM model_tests WHERE model_id=? AND created_at>?',row.id,now-86400000).n;
           if(count>=config.dailyRequestLimit)throw new ApiError(429,'MODEL_DAILY_LIMIT','该模型今日调用额度已用完');
-          try{secret=openKey(row.encrypted_key,modelMasterKey);}catch{throw new ApiError(503,'MODEL_UNAVAILABLE','该模型密钥当前不可用，请联系管理员');}
-          model={key:product.key,name:product.name,provider:product.provider,mode};
+          if(config.execution==='coze')secret=null;
+          else try{secret=openKey(row.encrypted_key,modelMasterKey);}catch{throw new ApiError(503,'MODEL_UNAVAILABLE','该模型密钥当前不可用，请联系管理员');}
+          model={key:product.key,name:config.execution==='coze'?config.displayName:product.name,provider:product.provider,mode};
         }else{
           const {apiKey,...publicConfig}=personal;secret=apiKey;config=publicConfig;
           model={key:`byok-${config.provider}`,name:config.modelId,provider:config.provider,mode};
@@ -116,8 +123,8 @@ export function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=officialMode
       });
       if(begin.replay)return begin.replay;
       request=begin.request;
-      const receipt=validateReceipt(await aiTransport(config,secret,question));
-      if(receipt.answer.includes(secret)||receipt.explanation.includes(secret))throw new Error('INVALID_PROVIDER_RESPONSE');
+      const receipt=validateReceipt(await (config.execution==='coze'?cozeBridge.search(config,question,{requestId:request.id}):aiTransport(config,secret,question)));
+      if(typeof secret==='string'&&secret&&(receipt.answer.includes(secret)||receipt.explanation.includes(secret)))throw new Error('INVALID_PROVIDER_RESPONSE');
       return store.transaction(()=>{
         const row=store.get('SELECT * FROM ai_requests WHERE id=?',request.id);
         if(row.status!=='pending')return previousResult(store,row,digest);

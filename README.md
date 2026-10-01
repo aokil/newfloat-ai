@@ -5,7 +5,7 @@
 ## 实际网站代码
 
 - [网站页面与素材](question-bank/server/public/)：头像、点数权益、使用帮助、模型选择、题库和导入复审。
-- [配套后端](question-bank/server/src/)：统一账号、私库导入／删除、模型目录、点数结算和结果回执。当前源码版本为 `0.5.0 / SQLite schema8`。
+- [配套后端](question-bank/server/src/)：统一账号、私库导入／删除、模型目录、点数结算和结果回执。当前源码版本为 `0.5.1 / SQLite schema8`。
 - [部署说明](question-bank/server/DEPLOYMENT.md)、[点数模型协议](contracts/points-models-v1.md)、[使用帮助](docs/help/points-and-models.md)。
 - [网站实现与剩余项](docs/validation/website-sync-2026-10-01.md)、[后端实现记录](docs/validation/points-backend-2026-10-01.md)。
 
@@ -14,6 +14,12 @@
 网站服务保存在独立的 `question-bank/server/` 目录；仓库根的 Next.js 项目继续承担 HTTPS 网关，运行参数见 [GATEWAY.md](GATEWAY.md)。源码不包含运行数据库、用户上传原件、真实环境凭据或安装包。
 
 Coze DEV 预览会直接读取已 Pull 的网站静态文件；生产与业务 API 继续走原网关。拉取后重启预览即可查看当前页面，业务功能是否可用仍取决于配套后端部署与真实配置。
+
+## Coze 内置语言模型
+
+Coze 入口新增受保护的模型执行路由，调用已有 `coze-coding-dev-sdk` 0.7.32。管理员可选择“Coze 内置集成”、读取真实可用型号并绑定计点档位，无需供应商 Key。账号／预占／结算和回执仍由独立后端负责；自带 Key 继续走官方供应商接口。
+
+新代码须先 Pull 并验证 DEV 项目运行时，再部署 Coze 与配套后端才能使用。未自动配置、调用或启用真实型号。SDK 超时无法硬取消平台生成，输出 token 预算也仅校验返回用量；真实型号、费用及可用性以平台和实际结果为准。见 [接入记录](docs/validation/coze-model-integration-2026-10-01.md) 和 [配置步骤](question-bank/server/DEPLOYMENT.md)。
 
 ## 原 Coze 模板说明
 
