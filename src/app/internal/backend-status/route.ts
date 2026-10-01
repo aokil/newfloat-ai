@@ -1,8 +1,10 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { Config, HeaderUtils, SupabaseClient } from 'coze-coding-dev-sdk';
-import { getNativeBackend } from '@/lib/native-backend.server';
+import { getNativeBackend, nativeBackendFailure } from '@/lib/native-backend.server';
 import { nativeModelBridge } from '@/lib/native-model-bridge.server';
 import type { CozeModelMetadata } from '@/lib/coze-llm.server';
+import { cozeIntegrationFailure, cozeModelMetadataFailure } from '@/lib/coze-llm.server';
+import type { CozeIntegrationFailure } from '@/lib/coze-llm.server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -21,13 +23,17 @@ const PRIVATE_HEADERS = {
 
 type Environment = 'DEV' | 'PROD';
 type BackendStatus = { ready: boolean; code: string | null; status: 'ok' | null;
-  schemaVersion: number | null; storage: 'postgres' | null };
+  schemaVersion: number | null; storage: 'postgres' | null;
+  initialization?: ReturnType<typeof nativeBackendFailure> };
 type BackendProbe = { status: BackendStatus; phoneReady: boolean };
-type ModelsStatus = { ready: boolean; code: string | null; items: CozeModelMetadata['items'] };
+type ModelsStatus = { ready: boolean; code: string | null; items: CozeModelMetadata['items'];
+  diagnostics?: CozeIntegrationFailure | null };
 type PhoneStatus = { ready: boolean; code: string | null; backendReady: boolean;
-  phone_enabled_supported: boolean; phone_enabled: boolean | null };
+  phone_enabled_supported: boolean; phone_enabled: boolean | null;
+  diagnostics?: CozeIntegrationFailure | { stage: string; businessCode: number } };
 type StatusPayload = { projectId: string; environment: Environment | null; ready: boolean;
-  identity: { ready: boolean; code: string | null; runtimePlatform: 'cloud' | null };
+  identity: { ready: boolean; code: string | null; runtimePlatform: 'cloud' | null;
+    credentialSource?: 'workload-token' | 'project-token'; scopedDatabaseInjected?: boolean };
   backend: BackendStatus; models: ModelsStatus; phone: PhoneStatus };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -101,7 +107,7 @@ async function backendStatus(): Promise<BackendProbe> {
         schemaVersion: value.schemaVersion, storage: 'postgres' as const }, phoneReady };
     })(), 25_000);
   } catch {
-    return { status: unavailableStatus, phoneReady: false };
+    return { status: { ...unavailableStatus, initialization: nativeBackendFailure() }, phoneReady: false };
   }
 }
 
@@ -116,7 +122,7 @@ async function modelsStatus(): Promise<ModelsStatus> {
     const allowed = new Set(['PROJECT_IDENTITY_UNAVAILABLE', 'COZE_INTEGRATION_NOT_READY',
       'COZE_MODEL_LIST_UNAVAILABLE', 'PROVIDER_RESPONSE_TOO_LARGE']);
     const code = error instanceof Error && allowed.has(error.message) ? error.message : 'COZE_MODEL_LIST_UNAVAILABLE';
-    return { ready: false, code, items: [] };
+    return { ready: false, code, items: [], diagnostics: cozeModelMetadataFailure() };
   }
 }
 
@@ -126,14 +132,15 @@ async function phoneStatus(config: Config, request: Request): Promise<PhoneStatu
   try {
     const client = new SupabaseClient(config, HeaderUtils.extractForwardHeaders(request.headers));
     const auth = await deadline(client.getAuthConfigV2(), 12_000);
-    if (auth.code !== 0 || !auth.config) return result;
+    if (auth.code !== 0 || !auth.config) return typeof auth.code === 'number' && Number.isSafeInteger(auth.code)
+      ? { ...result, diagnostics: { stage: 'phone-configuration', businessCode: auth.code } } : result;
     if (auth.config.project_id !== PROJECT_ID) return { ...result, code: 'PROJECT_IDENTITY_UNAVAILABLE' };
     const enabled: unknown = auth.config.phone_config?.external_phone_enabled;
     if (typeof enabled !== 'boolean') return { ...result, code: 'PHONE_AUTH_CONFIG_UNSUPPORTED' };
     return { ...result, code: enabled ? null : 'PHONE_AUTH_DISABLED',
       phone_enabled_supported: true, phone_enabled: enabled };
-  } catch {
-    return result;
+  } catch (error: unknown) {
+    return { ...result, diagnostics: cozeIntegrationFailure(error, 'phone-configuration') };
   }
 }
 
@@ -165,7 +172,10 @@ export async function GET(request: Request): Promise<Response> {
   if (!phone.ready && phone.code === null) phone.code = 'PHONE_BACKEND_UNAVAILABLE';
   return response({ projectId: PROJECT_ID, environment: knownEnvironment,
     ready: backend.status.ready && models.ready && phone.ready,
-    identity: { ready: true, code: null, runtimePlatform: 'cloud' },
+    identity: { ready: true, code: null, runtimePlatform: 'cloud',
+      credentialSource: process.env.COZE_API_TOKEN === process.env.COZE_WORKLOAD_IDENTITY_API_KEY
+        ? 'workload-token' : 'project-token',
+      scopedDatabaseInjected: Boolean(process.env[`PGDATABASE_URL_${knownEnvironment}`]) },
     backend: backend.status, models, phone });
 }
 

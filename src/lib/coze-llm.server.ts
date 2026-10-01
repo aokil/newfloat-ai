@@ -44,6 +44,8 @@ export type CozeModelMetadata = { projectId: string; environment: ProjectEnviron
 export type CozeModelExecutionContext = { headers?: Headers | Record<string, string>; signal?: AbortSignal };
 export type CozeCompletionEnvelope = { projectId: string; environment: ProjectEnvironment;
   requestId: string; result: CompletionResult };
+export type CozeIntegrationFailure = { stage: string; httpStatus: number | null;
+  errorType: 'APIError' | 'NetworkError' | 'ConfigurationError' | null; code: string | null };
 
 class BridgeError extends Error {
   constructor(readonly status: number, readonly code: string, readonly publicMessage: string) {
@@ -55,6 +57,29 @@ const nonces = new Map<string, number>();
 let modelCache: ModelCache | undefined;
 let modelFetch: Promise<LLMModelInfo[]> | undefined;
 let activeCompletions = 0;
+let metadataFailure: CozeIntegrationFailure | null = null;
+
+/** Protected diagnostics only: never include upstream messages, headers, data or URLs. */
+export function cozeIntegrationFailure(error: unknown, stage: string): CozeIntegrationFailure {
+  const result: CozeIntegrationFailure = { stage, httpStatus: null, errorType: null, code: null };
+  if (!isRecord(error)) return result;
+  if (error.name === 'APIError' || error.name === 'NetworkError' || error.name === 'ConfigurationError')
+    result.errorType = error.name;
+  for (const status of [error.statusCode, error.status, isRecord(error.response) ? error.response.status : null]) {
+    if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599)
+      result.httpStatus = status;
+  }
+  const codes = new Set(['ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ECONNREFUSED',
+    'UND_ERR_CONNECT_TIMEOUT', 'ABORT_ERR', 'EMPTY_MODEL_DIRECTORY', 'INVALID_MODEL_DIRECTORY']);
+  for (const candidate of [error, error.originalError, error.cause]) {
+    if (isRecord(candidate) && typeof candidate.code === 'string' && codes.has(candidate.code)) result.code = candidate.code;
+  }
+  return result;
+}
+
+export function cozeModelMetadataFailure(): CozeIntegrationFailure | null {
+  return metadataFailure ? { ...metadataFailure } : null;
+}
 
 function serializedPayload(value: unknown): string {
   const serialized = JSON.stringify(value);
@@ -235,7 +260,20 @@ async function availableModels(expiresAt: number): Promise<LLMModelInfo[]> {
   if (modelCache && modelCache.expiresAt > Date.now()) return modelCache.items;
   if (!modelFetch) {
     // SDK listModels has no AbortSignal argument. Keep one in-flight request even after a caller deadline.
-    const fetchOperation = listModels().then(normalizeModels);
+    const fetchOperation = listModels().catch((error: unknown) => {
+      metadataFailure = cozeIntegrationFailure(error, 'directory-request');
+      throw error;
+    }).then((value: unknown) => {
+      try {
+        const items = normalizeModels(value);
+        metadataFailure = null;
+        return items;
+      } catch {
+        metadataFailure = { stage: 'directory-response', httpStatus: null, errorType: null,
+          code: Array.isArray(value) && value.length === 0 ? 'EMPTY_MODEL_DIRECTORY' : 'INVALID_MODEL_DIRECTORY' };
+        throw new BridgeError(503, 'MODEL_LIST_UNAVAILABLE', '暂时无法读取可用模型');
+      }
+    });
     modelFetch = fetchOperation;
     void fetchOperation.then(items => {
       modelCache = { items, expiresAt: Date.now() + MODEL_CACHE_MS };
@@ -243,10 +281,12 @@ async function availableModels(expiresAt: number): Promise<LLMModelInfo[]> {
       if (modelFetch === fetchOperation) modelFetch = undefined;
     });
   }
+  const timeoutFailure = new BridgeError(503, 'MODEL_LIST_UNAVAILABLE', '暂时无法读取可用模型');
   try {
-    return await deadline(modelFetch, Math.min(expiresAt, Date.now() + MODEL_DEADLINE_MS),
-      new BridgeError(503, 'MODEL_LIST_UNAVAILABLE', '暂时无法读取可用模型'));
-  } catch {
+    return await deadline(modelFetch, Math.min(expiresAt, Date.now() + MODEL_DEADLINE_MS), timeoutFailure);
+  } catch (error: unknown) {
+    if (error === timeoutFailure) metadataFailure = { stage: 'directory-request', httpStatus: null,
+      errorType: null, code: 'DEADLINE_EXCEEDED' };
     throw new BridgeError(503, 'MODEL_LIST_UNAVAILABLE', '暂时无法读取可用模型');
   }
 }
