@@ -2,7 +2,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { Config, HeaderUtils, LLMClient, listModels } from 'coze-coding-dev-sdk';
 import type { LLMModelInfo, Message } from 'coze-coding-dev-sdk';
 import projectModelSnapshot from './coze-project-models.json';
-import { acceptProductionInjectedResources } from './coze-workload.server';
+import { acceptProductionInjectedResources, productionConfigurationUnchanged } from './coze-workload.server';
 
 const PROJECT_ID = '7689833705046130729';
 const BRIDGE_PATH = '/internal/model-completion';
@@ -297,6 +297,9 @@ export function cozeProjectRuntimeContext(): ProjectContext {
  * This is a platform configuration boundary; each service authenticates its actual calls. */
 export async function verifiedCozeProjectRuntimeContext(): Promise<ProjectContext> {
   const context = cozeProjectRuntimeContext();
+  if (!productionConfigurationUnchanged()) {
+    throw new BridgeError(503, 'PROJECT_IDENTITY_UNAVAILABLE', '模型项目配置已经变化，请重启服务');
+  }
   if (context.environment === 'PROD' &&
     (context.credentialSource !== 'workload-token' || !acceptProductionInjectedResources())) {
     throw new BridgeError(503, 'MODEL_AUTH_UNAVAILABLE', 'Coze 正式环境配置尚未就绪');

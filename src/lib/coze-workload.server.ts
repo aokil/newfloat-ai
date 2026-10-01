@@ -282,6 +282,11 @@ function productionConfigurationAccepted(): boolean {
   return hash !== null && state.productionConfigurationHash === hash;
 }
 
+/** A process that accepted PROD cannot later serve a DEV/model identity. */
+export function productionConfigurationUnchanged(): boolean {
+  return state.productionConfigurationHash === undefined || productionConfigurationAccepted();
+}
+
 function resourceBindingsMatch(left: WorkloadProjectResources | null | undefined,
   right: WorkloadProjectResources | null | undefined): boolean {
   if (!left?.databaseUrl || !left.phoneConfiguration?.supabaseUrl || !left.phoneConfiguration.anonKey ||
