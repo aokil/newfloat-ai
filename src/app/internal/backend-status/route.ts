@@ -6,7 +6,7 @@ import type { CozeModelMetadata } from '@/lib/coze-llm.server';
 import { cozeIntegrationFailure, cozeModelMetadataFailure, verifiedCozeProjectRuntimeContext,
   cozeRuntimeIdentityDiagnostics } from '@/lib/coze-llm.server';
 import type { CozeIntegrationFailure, CozeRuntimeIdentityDiagnostics } from '@/lib/coze-llm.server';
-import { diagnoseWorkloadProjectEnvFailure, getInjectedProjectResources,
+import { acceptProductionInjectedResources, diagnoseWorkloadProjectEnvFailure, getInjectedProjectResources,
   workloadRuntimeStatus } from '@/lib/coze-workload.server';
 
 export const runtime = 'nodejs';
@@ -14,6 +14,7 @@ export const dynamic = 'force-dynamic';
 
 const PROJECT_ID = '7689833705046130729';
 const RESPONSE_LIMIT = 128 * 1024;
+const PHONE_SETTINGS_LIMIT = 16 * 1024;
 const PRIVATE_HEADERS = {
   'Content-Type': 'application/json; charset=utf-8',
   'Cache-Control': 'private, no-store, max-age=0',
@@ -35,6 +36,7 @@ type ModelsStatus = { ready: boolean; code: string | null; items: CozeModelMetad
   diagnostics?: CozeIntegrationFailure | null };
 type PhoneStatus = { ready: boolean; code: string | null; backendReady: boolean;
   phone_enabled_supported: boolean; phone_enabled: boolean | null;
+  source?: 'supabase-settings' | 'coze-auth-config';
   diagnostics?: CozeIntegrationFailure | { stage: string; businessCode: number } };
 type StatusPayload = { projectId: string; environment: Environment | null; ready: boolean;
   identity: { ready: boolean; code: string | null; runtimePlatform: 'cloud' | 'local' | null;
@@ -135,9 +137,76 @@ async function modelsStatus(): Promise<ModelsStatus> {
   }
 }
 
-async function phoneStatus(config: Config, request: Request): Promise<PhoneStatus> {
+async function productionPhoneStatus(statusExpiresAt: number): Promise<PhoneStatus> {
   const result: PhoneStatus = { ready: false, code: 'PHONE_AUTH_CONFIG_UNAVAILABLE', backendReady: false,
-    phone_enabled_supported: false, phone_enabled: null };
+    phone_enabled_supported: false, phone_enabled: null, source: 'supabase-settings' };
+  if (!acceptProductionInjectedResources()) return result;
+  const phone = getInjectedProjectResources()?.phoneConfiguration;
+  if (!phone) return result;
+  // Query the same frozen Supabase origin used by the actual SMS verifier.
+  // Provider settings establish configuration only; SMS delivery still needs a real verification flow.
+  const endpoint = new URL('/auth/v1/settings', phone.supabaseUrl);
+  if (endpoint.origin !== phone.supabaseUrl || endpoint.pathname !== '/auth/v1/settings' ||
+    endpoint.search || endpoint.hash) return result;
+  const expiresAt = Math.min(Date.now() + 8_000, statusExpiresAt);
+  if (expiresAt <= Date.now()) return result;
+  const controller = new AbortController();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cancelReader = () => { if (reader) void reader.cancel().catch(() => undefined); };
+  controller.signal.addEventListener('abort', cancelReader, { once: true });
+  const current = () => !controller.signal.aborted && Date.now() < expiresAt &&
+    acceptProductionInjectedResources();
+  try {
+    const operation = (async (): Promise<PhoneStatus> => {
+      if (!current()) return result;
+      const upstream = await fetch(endpoint, { method: 'GET', headers: { apikey: phone.anonKey },
+        redirect: 'error', cache: 'no-store', signal: controller.signal });
+      if (!current() || upstream.status !== 200 || upstream.redirected || upstream.url !== endpoint.href) {
+        if (upstream.body) void upstream.body.cancel().catch(() => undefined);
+        return result;
+      }
+      if (!upstream.body) return result;
+      const streamReader = upstream.body.getReader();
+      reader = streamReader;
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      while (current()) {
+        const chunk = await streamReader.read();
+        if (!current()) return result;
+        if (chunk.done) break;
+        size += chunk.value.byteLength;
+        if (size > PHONE_SETTINGS_LIMIT) return result;
+        chunks.push(chunk.value);
+      }
+      if (!current() || size === 0) return result;
+      const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size)));
+      if (!current()) return result;
+      if (!record(value) || !record(value.external) || typeof value.external.phone !== 'boolean') {
+        return { ...result, code: 'PHONE_AUTH_CONFIG_UNSUPPORTED' };
+      }
+      return { ...result, code: value.external.phone ? null : 'PHONE_AUTH_DISABLED',
+        phone_enabled_supported: true, phone_enabled: value.external.phone };
+    })();
+    return await Promise.race([operation, new Promise<PhoneStatus>((resolve) => {
+      timer = setTimeout(() => { controller.abort(); resolve(result); }, Math.max(1, expiresAt - Date.now()));
+    })]);
+  } catch {
+    // Never include the endpoint, key, response body or raw fetch error in status output.
+    return result;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    controller.abort();
+    controller.signal.removeEventListener('abort', cancelReader);
+    cancelReader();
+  }
+}
+
+async function phoneStatus(config: Config, request: Request, environment: Environment | null,
+  statusExpiresAt: number): Promise<PhoneStatus> {
+  if (environment === 'PROD') return productionPhoneStatus(statusExpiresAt);
+  const result: PhoneStatus = { ready: false, code: 'PHONE_AUTH_CONFIG_UNAVAILABLE', backendReady: false,
+    phone_enabled_supported: false, phone_enabled: null, source: 'coze-auth-config' };
   try {
     const client = new SupabaseClient(config, HeaderUtils.extractForwardHeaders(request.headers));
     const auth = await deadline(client.getAuthConfigV2(), 12_000);
@@ -194,10 +263,14 @@ export async function GET(request: Request): Promise<Response> {
     scopedPhoneInjected: Boolean(getInjectedProjectResources()?.phoneConfiguration) };
   let probes: [BackendProbe, ModelsStatus, PhoneStatus];
   try {
-    probes = await deadline(Promise.all([backendStatus(), modelsStatus(), phoneStatus(config, request)]),
+    probes = await deadline(Promise.all([backendStatus(), modelsStatus(), phoneStatus(config, request, knownEnvironment, expiresAt)]),
       Math.max(1, expiresAt - Date.now()));
   } catch {
     return response({ ...unavailable('COZE_BACKEND_STATUS_TIMEOUT', knownEnvironment), identity,
+      workload: workloadRuntimeStatus() });
+  }
+  if (knownEnvironment === 'PROD' && !acceptProductionInjectedResources()) {
+    return response({ ...unavailable('PROJECT_IDENTITY_UNAVAILABLE', knownEnvironment),
       workload: workloadRuntimeStatus() });
   }
   const [backend, models, phone] = probes;
