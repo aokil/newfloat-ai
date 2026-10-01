@@ -49,6 +49,25 @@ export type CozeCompletionEnvelope = { projectId: string; environment: ProjectEn
   requestId: string; result: CompletionResult };
 export type CozeIntegrationFailure = { stage: string; httpStatus: number | null;
   errorType: 'APIError' | 'NetworkError' | 'ConfigurationError' | null; code: string | null };
+const WORKLOAD_IDENTITY_ENV = [
+  'COZE_WORKLOAD_IDENTITY_CLIENT_ID',
+  'COZE_WORKLOAD_IDENTITY_CLIENT_SECRET',
+  'COZE_WORKLOAD_IDENTITY_TOKEN_ENDPOINT',
+  'COZE_WORKLOAD_ACCESS_TOKEN_ENDPOINT',
+  'COZE_OUTBOUND_AUTH_ENDPOINT',
+] as const;
+export type CozeRuntimeIdentityDiagnostics = {
+  envProjectMatches: boolean;
+  envPhaseValid: boolean;
+  devboxPresent: boolean;
+  projectTokenPresent: boolean;
+  workloadTokenPresent: boolean;
+  sdkConfigConstructed: boolean;
+  sdkProjectMatches: boolean;
+  sdkRuntimePlatform: 'cloud' | 'local' | 'unknown';
+  sdkUsesUserRuntimeAuth: boolean;
+  workloadEnvironment: Record<(typeof WORKLOAD_IDENTITY_ENV)[number], boolean>;
+};
 
 class BridgeError extends Error {
   constructor(readonly status: number, readonly code: string, readonly publicMessage: string) {
@@ -82,6 +101,39 @@ export function cozeIntegrationFailure(error: unknown, stage: string): CozeInteg
 
 export function cozeModelMetadataFailure(): CozeIntegrationFailure | null {
   return metadataFailure ? { ...metadataFailure } : null;
+}
+
+/** Protected, local-only diagnostics. No validation, request, credential or raw error is returned. */
+export function cozeRuntimeIdentityDiagnostics(): CozeRuntimeIdentityDiagnostics {
+  const projectToken = process.env.COZE_API_TOKEN?.trim();
+  const workloadToken = process.env.COZE_WORKLOAD_IDENTITY_API_KEY?.trim();
+  const environment = process.env.COZE_PROJECT_ENV;
+  const diagnostics: CozeRuntimeIdentityDiagnostics = {
+    envProjectMatches: process.env.COZE_PROJECT_ID === PROJECT_ID,
+    envPhaseValid: environment === 'DEV' || environment === 'PROD',
+    devboxPresent: Boolean(process.env.COZE_DEVBOX_ENV?.trim()),
+    projectTokenPresent: Boolean(projectToken),
+    workloadTokenPresent: Boolean(workloadToken),
+    sdkConfigConstructed: false,
+    sdkProjectMatches: false,
+    sdkRuntimePlatform: 'unknown',
+    sdkUsesUserRuntimeAuth: false,
+    workloadEnvironment: Object.fromEntries(WORKLOAD_IDENTITY_ENV.map(name =>
+      [name, Boolean(process.env[name]?.trim())])) as CozeRuntimeIdentityDiagnostics['workloadEnvironment'],
+  };
+  try {
+    // SDK 0.7.32 constructs its context from local files/environment only.
+    // Use the unmodified SDK here so these flags describe its own identity interpretation.
+    const config = new Config({ apiKey: projectToken || workloadToken || '', retryTimes: 0 });
+    diagnostics.sdkConfigConstructed = true;
+    diagnostics.sdkProjectMatches = config.projectId === PROJECT_ID;
+    diagnostics.sdkRuntimePlatform = config.runtimePlatform === 'cloud' || config.runtimePlatform === 'local'
+      ? config.runtimePlatform : 'unknown';
+    diagnostics.sdkUsesUserRuntimeAuth = config.usesUserRuntimeAuth();
+  } catch {
+    // Keep only the fixed unavailable flags; never return filesystem paths or SDK exceptions.
+  }
+  return diagnostics;
 }
 
 function serializedPayload(value: unknown): string {

@@ -3,8 +3,9 @@ import { Config, HeaderUtils, SupabaseClient } from 'coze-coding-dev-sdk';
 import { getNativeBackend, nativeBackendFailure } from '@/lib/native-backend.server';
 import { nativeModelBridge } from '@/lib/native-model-bridge.server';
 import type { CozeModelMetadata } from '@/lib/coze-llm.server';
-import { cozeIntegrationFailure, cozeModelMetadataFailure, cozeProjectRuntimeContext } from '@/lib/coze-llm.server';
-import type { CozeIntegrationFailure } from '@/lib/coze-llm.server';
+import { cozeIntegrationFailure, cozeModelMetadataFailure, cozeProjectRuntimeContext,
+  cozeRuntimeIdentityDiagnostics } from '@/lib/coze-llm.server';
+import type { CozeIntegrationFailure, CozeRuntimeIdentityDiagnostics } from '@/lib/coze-llm.server';
 import { getInjectedProjectResources, workloadRuntimeStatus } from '@/lib/coze-workload.server';
 
 export const runtime = 'nodejs';
@@ -37,7 +38,7 @@ type PhoneStatus = { ready: boolean; code: string | null; backendReady: boolean;
 type StatusPayload = { projectId: string; environment: Environment | null; ready: boolean;
   identity: { ready: boolean; code: string | null; runtimePlatform: 'cloud' | null;
     credentialSource?: 'workload-token' | 'project-token'; scopedDatabaseInjected?: boolean;
-    scopedPhoneInjected?: boolean };
+    scopedPhoneInjected?: boolean; diagnostics: CozeRuntimeIdentityDiagnostics };
   backend: BackendStatus; models: ModelsStatus; phone: PhoneStatus;
   workload?: ReturnType<typeof workloadRuntimeStatus> };
 
@@ -62,7 +63,7 @@ function notFound(): Response {
 
 function unavailable(code: string, environment: Environment | null): StatusPayload {
   return { projectId: PROJECT_ID, environment, ready: false,
-    identity: { ready: false, code, runtimePlatform: null },
+    identity: { ready: false, code, runtimePlatform: null, diagnostics: cozeRuntimeIdentityDiagnostics() },
     backend: { ready: false, code, status: null, schemaVersion: null, storage: null },
     models: { ready: false, code, items: [] },
     phone: { ready: false, code, backendReady: false, phone_enabled_supported: false, phone_enabled: null } };
@@ -177,6 +178,7 @@ export async function GET(request: Request): Promise<Response> {
     ready: backend.status.ready && models.ready && phone.ready,
     identity: { ready: true, code: null, runtimePlatform: 'cloud',
       credentialSource,
+      diagnostics: cozeRuntimeIdentityDiagnostics(),
       scopedDatabaseInjected: Boolean(getInjectedProjectResources()?.databaseUrl),
       scopedPhoneInjected: Boolean(getInjectedProjectResources()?.phoneConfiguration) },
     backend: backend.status, models, phone, workload: workloadRuntimeStatus() });
