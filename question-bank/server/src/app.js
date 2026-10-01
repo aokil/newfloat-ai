@@ -56,7 +56,7 @@ function indexedQuestions(payload) {
 }
 export async function buildApp({ database = ':memory:', store: providedStore = null, logger = false, rateLimits = true, smsTransport = null, smsHmacKey = null, smsLimits = true, phoneVerifier = null, testHooks = {}, modelMasterKey = null, modelTransport, aiTransport, cozeBridge = null, appUpdateDirectory = null, trustProxy = ['127.0.0.1', '::1'], bootstrapAdminPhone = null } = {}) {
     const store = providedStore || await AsyncSqliteStore.open(database);
-    if (bootstrapAdminPhone !== null) phoneNumber(bootstrapAdminPhone);
+    if (bootstrapAdminPhone !== null) bootstrapAdminPhone = phoneNumber(bootstrapAdminPhone);
     // Runtime readiness is shared with catalog/account checks; no credentials or
     // execution configuration are copied into the account database.
     Object.defineProperty(store, 'cozeBridgeReady', { value: () => cozeBridge?.ready === true && ['metadata', 'test', 'search'].every(method => typeof cozeBridge[method] === 'function') });
