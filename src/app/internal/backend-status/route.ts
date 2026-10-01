@@ -3,7 +3,7 @@ import { Config, HeaderUtils, SupabaseClient } from 'coze-coding-dev-sdk';
 import { getNativeBackend, nativeBackendFailure } from '@/lib/native-backend.server';
 import { nativeModelBridge } from '@/lib/native-model-bridge.server';
 import type { CozeModelMetadata } from '@/lib/coze-llm.server';
-import { cozeIntegrationFailure, cozeModelMetadataFailure, cozeProjectRuntimeContext,
+import { cozeIntegrationFailure, cozeModelMetadataFailure, verifiedCozeProjectRuntimeContext,
   cozeRuntimeIdentityDiagnostics } from '@/lib/coze-llm.server';
 import type { CozeIntegrationFailure, CozeRuntimeIdentityDiagnostics } from '@/lib/coze-llm.server';
 import { getInjectedProjectResources, workloadRuntimeStatus } from '@/lib/coze-workload.server';
@@ -36,9 +36,10 @@ type PhoneStatus = { ready: boolean; code: string | null; backendReady: boolean;
   phone_enabled_supported: boolean; phone_enabled: boolean | null;
   diagnostics?: CozeIntegrationFailure | { stage: string; businessCode: number } };
 type StatusPayload = { projectId: string; environment: Environment | null; ready: boolean;
-  identity: { ready: boolean; code: string | null; runtimePlatform: 'cloud' | null;
+  identity: { ready: boolean; code: string | null; runtimePlatform: 'cloud' | 'local' | null;
     credentialSource?: 'workload-token' | 'project-token'; scopedDatabaseInjected?: boolean;
-    scopedPhoneInjected?: boolean; diagnostics: CozeRuntimeIdentityDiagnostics };
+    scopedPhoneInjected?: boolean; verification?: 'devbox' | 'production-workload';
+    diagnostics: CozeRuntimeIdentityDiagnostics };
   backend: BackendStatus; models: ModelsStatus; phone: PhoneStatus;
   workload?: ReturnType<typeof workloadRuntimeStatus> };
 
@@ -156,31 +157,48 @@ async function phoneStatus(config: Config, request: Request): Promise<PhoneStatu
 export async function GET(request: Request): Promise<Response> {
   // No SDK construction, database initialization or metadata calls before key authentication.
   if (!authorized(request)) return notFound();
+  const expiresAt = Date.now() + 25_000;
   const environment = process.env.COZE_PROJECT_ENV;
   const knownEnvironment = environment === 'DEV' || environment === 'PROD' ? environment : null;
   let config: Config;
   let credentialSource: 'workload-token' | 'project-token';
+  let runtimeIdentity: 'devbox' | 'production-workload';
   try {
     if (process.env.COZE_PROJECT_ID !== PROJECT_ID || knownEnvironment === null || !nativeModelBridge().ready) {
       return response(unavailable('PROJECT_IDENTITY_UNAVAILABLE', knownEnvironment));
     }
-    ({ config, credentialSource } = cozeProjectRuntimeContext());
-  } catch {
+    ({ config, credentialSource, runtimeIdentity } = await deadline(verifiedCozeProjectRuntimeContext(),
+      Math.max(1, expiresAt - Date.now())));
+  } catch (error: unknown) {
+    const code = error instanceof Error && error.message === 'STATUS_TIMEOUT' ? 'COZE_BACKEND_STATUS_TIMEOUT'
+      : error instanceof Error && error.message === 'MODEL_AUTH_UNAVAILABLE' ? 'COZE_RUNTIME_AUTH_UNAVAILABLE'
+      : 'PROJECT_IDENTITY_UNAVAILABLE';
+    return response({ ...unavailable(code, knownEnvironment),
+      workload: workloadRuntimeStatus() });
+  }
+  const runtimePlatform = config.runtimePlatform;
+  if (runtimePlatform !== 'cloud' && runtimePlatform !== 'local') {
     return response(unavailable('PROJECT_IDENTITY_UNAVAILABLE', knownEnvironment));
   }
-  const [backend, models, phone] = await Promise.all([
-    backendStatus(), modelsStatus(), phoneStatus(config, request),
-  ]);
+  const identity: StatusPayload['identity'] = { ready: true, code: null, runtimePlatform,
+    credentialSource, verification: runtimeIdentity, diagnostics: cozeRuntimeIdentityDiagnostics(),
+    scopedDatabaseInjected: Boolean(getInjectedProjectResources()?.databaseUrl),
+    scopedPhoneInjected: Boolean(getInjectedProjectResources()?.phoneConfiguration) };
+  let probes: [BackendProbe, ModelsStatus, PhoneStatus];
+  try {
+    probes = await deadline(Promise.all([backendStatus(), modelsStatus(), phoneStatus(config, request)]),
+      Math.max(1, expiresAt - Date.now()));
+  } catch {
+    return response({ ...unavailable('COZE_BACKEND_STATUS_TIMEOUT', knownEnvironment), identity,
+      workload: workloadRuntimeStatus() });
+  }
+  const [backend, models, phone] = probes;
   phone.backendReady = backend.status.ready && backend.phoneReady;
   phone.ready = phone.backendReady && phone.phone_enabled === true;
   if (!phone.ready && phone.code === null) phone.code = 'PHONE_BACKEND_UNAVAILABLE';
   return response({ projectId: PROJECT_ID, environment: knownEnvironment,
     ready: backend.status.ready && models.ready && phone.ready,
-    identity: { ready: true, code: null, runtimePlatform: 'cloud',
-      credentialSource,
-      diagnostics: cozeRuntimeIdentityDiagnostics(),
-      scopedDatabaseInjected: Boolean(getInjectedProjectResources()?.databaseUrl),
-      scopedPhoneInjected: Boolean(getInjectedProjectResources()?.phoneConfiguration) },
+    identity,
     backend: backend.status, models, phone, workload: workloadRuntimeStatus() });
 }
 

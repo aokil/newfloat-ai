@@ -1,16 +1,19 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ensureDatabaseEnvironment, ensureSupabaseEnvironment } from 'coze-coding-dev-sdk';
 import type { SupabaseEnvironment } from 'coze-coding-dev-sdk';
 import { nativeModelBridge } from './native-model-bridge.server';
+import { verifiedCozeProjectRuntimeContext } from './coze-llm.server';
 import { getInjectedProjectResources, getWorkloadProjectResources } from './coze-workload.server';
 
 const PROJECT_ID = '7689833705046130729';
 const STATE_KEY = Symbol.for('float-ai.native-backend.7689833705046130729.v1');
 type BackendFailure = { stage: string; code: string | null; httpStatus: number | null };
-type BackendState = { backend?: Promise<FastifyInstance>; retryAt: number; closing?: Promise<void>; failure?: BackendFailure };
+type BackendState = { backend?: Promise<FastifyInstance>; retryAt: number; closing?: Promise<void>;
+  failure?: BackendFailure; runtimeBindingHash?: string };
 const processGlobal = globalThis as typeof globalThis & { [STATE_KEY]?: BackendState };
 // The HTTP entry and Next route chunks bundle this module independently.
 // A process-wide symbol keeps their requests and diagnostics on one instance.
@@ -46,8 +49,28 @@ export function nativeBackendFailure(): BackendFailure | null {
 type NativeFactory = (options: { databaseUrl: string; phoneConfiguration?: SupabaseEnvironment;
   cozeBridge: ReturnType<typeof nativeModelBridge> }) => Promise<FastifyInstance>;
 
+/** Freeze the instance's project, phase, credential and resource binding in memory. */
+function runtimeBindingHash(): string {
+  const names = ['COZE_PROJECT_ID', 'COZE_PROJECT_ENV', 'COZE_DEVBOX_ENV', 'PROJECT_PATH', 'COZE_WORKSPACE_PATH',
+    'COZE_API_TOKEN', 'COZE_WORKLOAD_IDENTITY_API_KEY', 'COZE_WORKLOAD_IDENTITY_CLIENT_ID',
+    'COZE_WORKLOAD_IDENTITY_CLIENT_SECRET', 'COZE_WORKLOAD_IDENTITY_TOKEN_ENDPOINT',
+    'COZE_WORKLOAD_ACCESS_TOKEN_ENDPOINT', 'COZE_OUTBOUND_AUTH_ENDPOINT', 'TIYU_GATEWAY_KEY',
+    'BOOTSTRAP_ADMIN_PHONE', 'PGDATABASE_URL_DEV', 'PGDATABASE_URL_PROD', 'TIYU_SUPABASE_URL_DEV',
+    'TIYU_SUPABASE_URL_PROD', 'TIYU_SUPABASE_ANON_KEY_DEV', 'TIYU_SUPABASE_ANON_KEY_PROD'];
+  return createHash('sha256').update(JSON.stringify(names.map(name => [name, process.env[name] ?? null]))).digest('hex');
+}
+
+function bindingChanged(): Promise<never> {
+  state.failure = { stage: 'runtime-binding', code: 'COZE_PROJECT_IDENTITY_UNAVAILABLE', httpStatus: null };
+  return Promise.reject(new Error('COZE_BACKEND_UNAVAILABLE'));
+}
+
 /** One shared backend per process, using only this project's DEV or PROD DB. */
 export function getNativeBackend(): Promise<FastifyInstance> {
+  const currentBinding = runtimeBindingHash();
+  // Never switch an existing or in-flight backend to another identity/database.
+  if ((state.runtimeBindingHash && state.runtimeBindingHash !== currentBinding) ||
+    (state.backend && !state.runtimeBindingHash)) return bindingChanged();
   if (state.closing) return Promise.reject(new Error('COZE_BACKEND_UNAVAILABLE'));
   if (state.backend) return state.backend;
   if (Date.now() < state.retryAt) return Promise.reject(new Error('COZE_BACKEND_UNAVAILABLE'));
@@ -58,6 +81,17 @@ export function getNativeBackend(): Promise<FastifyInstance> {
     const bridge = nativeModelBridge();
     // Validate the platform identity without mutating global SDK credentials.
     if (!bridge.ready) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
+    // The SDK's first Config construction can load the platform .env. Freeze
+    // the validated configuration before the first asynchronous operation.
+    const authorizedBinding = runtimeBindingHash();
+    if (state.runtimeBindingHash && state.runtimeBindingHash !== authorizedBinding)
+      throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
+    state.runtimeBindingHash ??= authorizedBinding;
+    stage = 'runtime-authorization';
+    // PROD has no DEVBOX marker. Require actual official workload authorization
+    // and phase-resource binding before any database initialization.
+    await verifiedCozeProjectRuntimeContext();
+    if (runtimeBindingHash() !== authorizedBinding) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     const injectedResources = getInjectedProjectResources();
     stage = 'workload-resources';
     const workloadResources = injectedResources?.databaseUrl && injectedResources.phoneConfiguration
@@ -85,9 +119,14 @@ export function getNativeBackend(): Promise<FastifyInstance> {
     if (!loaded || typeof loaded !== 'object' || !('createCozeApp' in loaded) || typeof loaded.createCozeApp !== 'function')
       throw new Error('COZE_BACKEND_MODULE_UNAVAILABLE');
     const createCozeApp = loaded.createCozeApp as NativeFactory;
+    if (runtimeBindingHash() !== authorizedBinding) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     stage = 'business-initialization';
     const app = await createCozeApp({ databaseUrl: database.databaseUrl,
       phoneConfiguration: phone, cozeBridge: bridge });
+    if (runtimeBindingHash() !== authorizedBinding) {
+      await app.close().catch(() => undefined);
+      throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
+    }
     state.failure = undefined;
     return app;
   })().catch((error: unknown) => {

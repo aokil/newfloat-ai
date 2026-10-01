@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { Client } from '@coze/workload-identity';
 
 const PROJECT_ID = '7689833705046130729';
@@ -27,9 +27,10 @@ export type WorkloadRuntimeStatus = {
   httpStatus: number | null;
   errorType: ErrorType | null;
   resources: { database: boolean; phone: boolean; projectApiToken: boolean };
+  productionBindingVerified: boolean;
 };
 type SharedState = {
-  identityHash: string;
+  identityHash?: string;
   phase?: Phase;
   client?: Client;
   resources?: WorkloadProjectResources;
@@ -43,21 +44,29 @@ type SharedState = {
 const STATE_KEY = Symbol.for('float-ai/coze-workload-resources/v1');
 const sharedGlobal = globalThis as typeof globalThis & { [STATE_KEY]?: SharedState };
 const state = sharedGlobal[STATE_KEY] ??= {
-  identityHash: identityFingerprint(), expiresAt: 0, retryAt: 0, stage: 'idle', httpStatus: null, errorType: null,
+  expiresAt: 0, retryAt: 0, stage: 'idle', httpStatus: null, errorType: null,
 };
 
 // The SDK token cache is process-wide. A changed identity requires a fresh process;
 // constructing another Client cannot safely switch the cached workload identity.
 function identityFingerprint(): string {
-  return createHash('sha256').update(JSON.stringify(REQUIRED_ENV.map((name) =>
+  const identityEnvironment = [...REQUIRED_ENV, 'COZE_PROJECT_ID', 'COZE_PROJECT_ENV',
+    'COZE_API_TOKEN', 'COZE_WORKLOAD_IDENTITY_API_KEY'];
+  return createHash('sha256').update(JSON.stringify(identityEnvironment.map((name) =>
     [name, process.env[name] ?? null]))).digest('hex');
 }
 
 function phase(): Phase | null {
   const environment = process.env.COZE_PROJECT_ENV;
-  return process.env.COZE_PROJECT_ID === PROJECT_ID &&
-    (environment === 'DEV' || environment === 'PROD') &&
-    Boolean(process.env.COZE_DEVBOX_ENV?.trim()) ? environment : null;
+  if (process.env.COZE_PROJECT_ID !== PROJECT_ID || (environment !== 'DEV' && environment !== 'PROD')) return null;
+  if (process.env.COZE_DEVBOX_ENV?.trim()) return environment;
+  // A production runtime may omit the DEVBOX marker. This permits
+  // resource verification only; it does not itself authenticate the runtime.
+  const workloadToken = process.env.COZE_WORKLOAD_IDENTITY_API_KEY?.trim();
+  const projectToken = process.env.COZE_API_TOKEN?.trim();
+  return environment === 'PROD' && Boolean(workloadToken) &&
+    (!projectToken || projectToken === workloadToken) &&
+    REQUIRED_ENV.every(name => Boolean(process.env[name]?.trim())) ? 'PROD' : null;
 }
 
 function environmentPresence(): WorkloadRuntimeStatus['environment'] {
@@ -144,13 +153,44 @@ export function getInjectedProjectResources(): WorkloadProjectResources | null {
   };
 }
 
+function resourceBindingsMatch(left: WorkloadProjectResources | null | undefined,
+  right: WorkloadProjectResources | null | undefined): boolean {
+  if (!left?.databaseUrl || !left.phoneConfiguration?.supabaseUrl || !left.phoneConfiguration.anonKey ||
+    !right?.databaseUrl || !right.phoneConfiguration?.supabaseUrl || !right.phoneConfiguration.anonKey) return false;
+  const digest = (resources: WorkloadProjectResources): Buffer => createHash('sha256').update(JSON.stringify([
+    resources.databaseUrl, resources.phoneConfiguration?.supabaseUrl, resources.phoneConfiguration?.anonKey,
+  ])).digest();
+  return timingSafeEqual(digest(left), digest(right));
+}
+
+/** Verify official workload resources against the complete injected PROD binding.
+ * The /env response supplies resources, not an independent remote project-ID assertion. */
+export async function verifyProductionWorkloadResources(): Promise<boolean> {
+  const currentPhase = phase();
+  const identityHash = identityFingerprint();
+  const injected = getInjectedProjectResources();
+  if (currentPhase !== 'PROD' || (state.identityHash !== undefined && identityHash !== state.identityHash) ||
+    !injected?.databaseUrl || !injected.phoneConfiguration) return false;
+  try {
+    // Existing single-flight/cache performs the official OAuth exchange and /env request.
+    const official = await getWorkloadProjectResources();
+    return phase() === currentPhase && identityFingerprint() === identityHash && state.identityHash === identityHash &&
+      state.phase === currentPhase && state.stage === 'ready' && state.expiresAt > Date.now() &&
+      resourceBindingsMatch(injected, getInjectedProjectResources()) &&
+      resourceBindingsMatch(injected, official) && resourceBindingsMatch(injected, state.resources);
+  } catch {
+    return false;
+  }
+}
+
 /** Diagnostics expose only readiness flags and sanitized failure categories. */
 export function workloadRuntimeStatus(): WorkloadRuntimeStatus {
   const environment = environmentPresence();
   const currentPhase = phase();
   const now = Date.now();
   const permitted = currentPhase !== null && (!state.phase || state.phase === currentPhase) &&
-    REQUIRED_ENV.every((name) => environment[name]) && identityFingerprint() === state.identityHash;
+    REQUIRED_ENV.every((name) => environment[name]) &&
+    (state.identityHash === undefined || identityFingerprint() === state.identityHash);
   if (state.stage === 'ready' && state.expiresAt <= now) {
     state.resources = undefined;
     state.expiresAt = 0;
@@ -164,6 +204,8 @@ export function workloadRuntimeStatus(): WorkloadRuntimeStatus {
     errorType: permitted ? state.errorType : 'ConfigurationError',
     resources: { database: Boolean(resources?.databaseUrl), phone: Boolean(resources?.phoneConfiguration),
       projectApiToken: Boolean(resources?.projectApiToken) },
+    productionBindingVerified: currentPhase === 'PROD' && state.stage === 'ready' &&
+      resourceBindingsMatch(getInjectedProjectResources(), resources),
   };
 }
 
@@ -172,7 +214,14 @@ export async function getWorkloadProjectResources(): Promise<WorkloadProjectReso
   const currentPhase = phase();
   const presence = environmentPresence();
   if (!currentPhase || (state.phase && state.phase !== currentPhase) ||
-    !REQUIRED_ENV.every((name) => presence[name]) || identityFingerprint() !== state.identityHash) return null;
+    !REQUIRED_ENV.every((name) => presence[name]) ||
+    (state.identityHash !== undefined && identityFingerprint() !== state.identityHash)) return null;
+  if (state.identityHash === undefined) {
+    // Config may synchronously load the platform .env before this first request.
+    // Freeze once before any official authorization/client/cache operation.
+    if (state.client || state.pending || state.phase || state.resources) return null;
+    state.identityHash = identityFingerprint();
+  }
   if (state.resources && state.expiresAt > Date.now()) return copyResources(state.resources);
   if (state.retryAt > Date.now()) return null;
   if (!state.pending) {
