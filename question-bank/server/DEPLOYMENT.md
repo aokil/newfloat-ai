@@ -1,5 +1,19 @@
 # M8 服务部署与运行
 
+## 当前：Coze 原生后台 0.6.0
+
+用户授权全部后台迁入既有 Coze，并舍弃旧账号和私人题库。**初始化新库，不需要 SSH 或旧数据导出。**下方独立服务器和执行桥步骤为历史说明。
+
+- 唯一 HTTP 服务直接运行现有 /v1 Fastify 接口，提供同一网站。Node24，后台 ESM 源码保持独立部署，避免破坏 worker 和静态文件的 import.meta.url。
+- SDK 解析 PGDATABASE_URL_DEV／PGDATABASE_URL_PROD；使用专用 float_ai PostgreSQL schema8，原件存 BYTEA，云端不使用工作目录 SQLite。
+- DEV／PROD 数据独立。首次部署仅同步结构，初始化空生产库；以后不复制开发数据。完整空结构缺版本行时，经完整结构和空数据验证才补标记。
+- 短信配置由 SDK ensureSupabaseEnvironment 在内存读取，平台手机号开关须支持并开启。BOOTSTRAP_ADMIN_PHONE 指定手机号完成真实注册、库内无管理员，才授予首位管理员，不预建密码／跳过验证码。
+- 内置模型直接调用项目 SDK；管理员读取真实目录、绑定1／2点档位、测试并启用。官方／自带 Key 规则保持，平台令牌不进入浏览器或 APK。
+- TIYU_GATEWAY_KEY 保护状态接口，并按用途派生服务端密钥。使用已加密官方模型 Key 后，轮换网关 Key 须保留独立 MODEL_MASTER_KEY，避免旧密文无法解密。
+- /health 查询实际数据库；受保护 /internal/backend-status 分项验证身份、数据库、真实目录及手机开关，不返回凭据。
+
+实际云端运行以 docs/CURRENT_STATE.md 为准，本地构建不等于 Pull／部署；手机仍暂停。见 [迁移记录](../../docs/validation/coze-native-backend-2026-10-01.md)。
+
 ## Coze 内置模型候选（2026-10-01）
 
 最新候选为 0.5.2/schema8：在 0.5.1 的执行桥上补充模型接口未上线时的明确文案与重试状态。0.5.1 独立部署包保持冻结。当前 DEV 已加载新前端，但 `/v1/models/catalog` 和 `/v1/admin/coze-models` 实际返回旧后台的默认 404；Pull 不会启动／升级独立账号服务。需要运行新后台后才能读取目录和保存模型配置，不能把静态预览正常当作业务可用。
@@ -14,7 +28,7 @@
 4. 备份现有数据库、部署配套账号服务和网页，并让服务读取上述环境文件。需要 `COZE_LLM_ORIGIN`、`COZE_LLM_ENVIRONMENT=PROD` 和服务端桥密钥；个人供应商 Key 和 `MODEL_MASTER_KEY` 不用于 Coze 执行。官方 API／BYOK 模式仍沿原配置。
 5. 管理页选择“Coze 内置集成”，读取真实型号，绑定 1／2 点产品档位，核对实际名称。保存后明确点“发送一次测试”；它可能消耗已有 Coze 资源，不扣普通用户点数。实际通过再启用，不自动开通全部型号、不充值资源。
 
-DEV 后端不得指向 PROD、PROD 后端不得指向 DEV。桥只接受已核对的固定生产主机或 UUID.dev.coze.site 预览主机，不支持任意 URL、重定向或客户端自带地址。详细协议与 SDK 超时／输出预算限制见 [Coze 模型执行协议](../../contracts/points-models-v1.md#coze-项目内置模型执行2026-10-01)。
+桥配置中的 DEV／PROD 必须与实际模型路由响应环境一致。现有 Coze DEV 和 PROD 网页共用一个独立账号后台，该后台只配置正式 PROD 执行桥；`--dev --check` 仅独立读取 DEV 目录，不切换主服务环境。当前没有独立 DEV 业务数据库或账号服务，不能声称两套业务已隔离。桥只接受已核对的固定生产主机或 UUID.dev.coze.site 预览主机，不支持任意 URL、重定向或客户端自带地址。详细协议与 SDK 超时／输出预算限制见 [Coze 模型执行协议](../../contracts/points-models-v1.md#coze-项目内置模型执行2026-10-01)。
 
 以下为已有 0.5.0 候选说明；实际产物和未完成步骤以项目现状为准。
 

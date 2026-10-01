@@ -1,6 +1,6 @@
 {
   "name": "newfloat-question-bank-server",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -26,6 +26,7 @@
     "fastify": "5.12.5",
     "mammoth": "1.12.3",
     "pdfjs-dist": "6.3.289",
+    "pg": "8.17.2",
     "yauzl": "3.4.0"
   },
   "overrides": {

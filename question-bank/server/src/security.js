@@ -57,22 +57,22 @@ export function phoneNumber(value) {
   return `+86${phone}`;
 }
 export function safeUser(row) { return {userId: row.id, username: row.username, phoneNumber:row.phone_number,phoneVerified:!!row.phone_verified,displayName: row.display_name,avatarId:row.avatar_id??null, roles: row.role === 'admin' ? ['user','admin'] : ['user']}; }
-export function issueSession(store, user, clientId, previous = null) {
+export async function issueSession(store, user, clientId, previous = null) {
   const accessToken = randomBytes(32).toString('base64url'); const refreshToken = randomBytes(48).toString('base64url');
   const now = Date.now(); const sessionId = previous?.id || id('s'); const expires = previous?.refresh_expires || now + REFRESH_MS;
   const accessExpires = Math.min(now + ACCESS_MS, expires);
-  if (previous) store.run('UPDATE sessions SET access_hash=?,refresh_hash=?,access_expires=? WHERE id=?', sha256(accessToken), sha256(refreshToken), accessExpires, sessionId);
-  else store.run('INSERT INTO sessions(id,user_id,family_id,client_id,access_hash,refresh_hash,access_expires,refresh_expires,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+  if (previous) await store.run('UPDATE sessions SET access_hash=?,refresh_hash=?,access_expires=? WHERE id=?', sha256(accessToken), sha256(refreshToken), accessExpires, sessionId);
+  else await store.run('INSERT INTO sessions(id,user_id,family_id,client_id,access_hash,refresh_hash,access_expires,refresh_expires,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
     sessionId, user.id, id('family'), clientId, sha256(accessToken), sha256(refreshToken), accessExpires, expires, now);
-  return {principal: safeUser(user), account:accountInfo(store,user,expires),session: {sessionId, clientId}, tokenType: 'Bearer', accessToken, refreshToken,
+  return {principal: safeUser(user), account:await accountInfo(store,user,expires),session: {sessionId, clientId}, tokenType: 'Bearer', accessToken, refreshToken,
     accessExpiresAt: new Date(accessExpires).toISOString(), refreshExpiresAt: new Date(expires).toISOString(),
     offlineUntil: new Date(Math.min(now + OFFLINE_MS, expires)).toISOString(), serverTime: new Date(now).toISOString()};
 }
-export function authenticate(store, request) {
+export async function authenticate(store, request) {
   const header = request.headers.authorization;
   if (typeof header !== 'string' || !/^Bearer [A-Za-z0-9_-]{40,100}$/.test(header)) throw new ApiError(401, 'INVALID_CREDENTIALS', '请先登录');
   const tokenHash = sha256(header.slice(7));
-  const session = store.get('SELECT s.*,u.username,u.role,u.disabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.access_hash=?', tokenHash);
+  const session = await store.get('SELECT s.*,u.username,u.role,u.disabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.access_hash=?', tokenHash);
   if (!session || session.revoked) throw new ApiError(401, 'SESSION_REVOKED', '登录已失效');
   if (session.disabled) throw new ApiError(403, 'ACCOUNT_DISABLED', '账号不可用');
   if (session.access_expires <= Date.now()) throw new ApiError(401, 'ACCESS_EXPIRED', '访问凭据已过期');

@@ -1,13 +1,14 @@
-import { proxyRequest } from '@/lib/tiyu-gateway.server';
 import { previewRequest } from '@/lib/tiyu-preview.server';
 
-// DEV previews use the committed website files; PROD and APIs use the backend.
+// The custom HTTP server dispatches business APIs directly to Fastify.
 // No user response is prerendered.
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 async function dispatch(request: Request): Promise<Response> {
-  return await previewRequest(request) ?? proxyRequest(request);
+  return await previewRequest(request) ?? Response.json({ error: {
+    code: 'NOT_FOUND', message: '未找到', retryable: false,
+  } }, { status: 404, headers: { 'Cache-Control': 'no-store' } });
 }
 
 export const GET = dispatch;

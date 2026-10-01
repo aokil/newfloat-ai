@@ -288,7 +288,7 @@ mkdir -p "${LOG_DIR}"
 
 export PORT="${DEPLOY_RUN_PORT}"
 server_pid="$(spawn_detached "${COZE_WORKSPACE_PATH}" "${LOG_FILE}" \
-  "$(command -v pnpm)" next dev --webpack --hostname 0.0.0.0 --port "${DEPLOY_RUN_PORT}")"
+  "$(command -v pnpm)" exec tsx src/server.ts)"
 if [[ -z "${server_pid}" ]]; then
   echo "Dev server failed to start: 未获取到后台进程 PID。" >&2
   dump_log

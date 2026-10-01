@@ -119,3 +119,5 @@ export function configuredCozeBridge(env=process.env){
     test(model,context){return execute('test',model,undefined,context);},
     search(model,question,context){return execute('search',model,question,context);}});
 }
+
+export {BRIDGE_ERRORS};

@@ -5,6 +5,9 @@ const nextConfig: NextConfig = {
   // outputFileTracingRoot: path.resolve(__dirname, '../../'),  // Uncomment and add 'import path from "path"' if needed
   /* config options here */
   serverExternalPackages: ['coze-coding-dev-sdk'],
+  outputFileTracingIncludes: {
+    '/*': ['./question-bank/server/src/**/*', './question-bank/server/public/**/*', './question-bank/server/package.json'],
+  },
   webpack: (config, { dev }) => {
     if (dev && config.cache && config.cache.type === 'filesystem') {
       config.cache.cacheDirectory = path.resolve(

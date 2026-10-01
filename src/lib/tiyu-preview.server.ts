@@ -28,14 +28,12 @@ const ASSETS: ReadonlyMap<string, PreviewAsset> = new Map([
 // Allow that fixed HTTPS CDN only in DEV; PROD policy is owned by the gateway.
 const PREVIEW_CSP = "default-src 'self'; script-src 'self' https://lf-cdn.coze.cn; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'";
 
-/** Serve the committed website for DEV previews without starting its backend. */
+/** Serve the same committed website in DEV and PROD; APIs run in Coze. */
 export function createPreviewFileServer(
   env: PreviewEnvironment = process.env,
   publicRoot: string = path.resolve(process.cwd(), 'question-bank/server/public'),
 ) {
   return async function preview(request: Request): Promise<Response | null> {
-    if (env.COZE_PROJECT_ENV === 'PROD' ||
-      (env.NODE_ENV !== 'development' && env.COZE_PROJECT_ENV !== 'DEV')) return null;
     if (request.method !== 'GET' && request.method !== 'HEAD') return null;
 
     const asset = ASSETS.get(new URL(request.url).pathname);
@@ -44,7 +42,9 @@ export function createPreviewFileServer(
     const headers = new Headers({
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
-      'Content-Security-Policy': PREVIEW_CSP,
+      'Content-Security-Policy': env.COZE_PROJECT_ENV === 'PROD'
+        ? "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        : PREVIEW_CSP,
     });
     try {
       const data = await readFile(path.join(publicRoot, asset.file));

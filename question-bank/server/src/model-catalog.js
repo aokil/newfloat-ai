@@ -14,9 +14,9 @@ export const MODEL_CATALOG = Object.freeze([
 
 export function catalogEntry(key) { return MODEL_CATALOG.find(item=>item.key===key); }
 
-export function configuredCatalog(store) {
+export async function configuredCatalog(store) {
   const configured=new Map();
-  for(const row of store.all('SELECT * FROM models ORDER BY created_at,id')) {
+  for(const row of await store.all('SELECT * FROM models ORDER BY created_at,id')) {
     let config;try{config=JSON.parse(row.config);}catch{continue;}
     if(!catalogEntry(config.catalogKey))continue;
     // Conflicting legacy/manual rows fail closed instead of picking a model.

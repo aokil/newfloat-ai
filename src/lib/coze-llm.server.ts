@@ -21,7 +21,8 @@ const RESPONSE_HEADERS = {
 };
 
 type ProjectEnvironment = 'DEV' | 'PROD';
-type Usage = { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+export type CozeUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+type Usage = CozeUsage;
 type CompletionBody = {
   requestId: string;
   mode: 'search' | 'test';
@@ -32,11 +33,17 @@ type CompletionBody = {
 };
 type Credentials = { key: string; timestamp: string; nonce: string; signature: string };
 type CompletionMetadata = { usage: Usage; latencyMs: number; providerRequestId: string | null };
-type SearchResult = CompletionMetadata & { answer: string; explanation: string };
-type TestResult = CompletionMetadata & { status: 'passed' };
+export type CozeSearchResult = CompletionMetadata & { answer: string; explanation: string };
+export type CozeTestResult = CompletionMetadata & { status: 'passed' };
+type SearchResult = CozeSearchResult;
+type TestResult = CozeTestResult;
 type CompletionResult = SearchResult | TestResult;
 type ProjectContext = { config: Config; environment: ProjectEnvironment };
 type ModelCache = { expiresAt: number; items: LLMModelInfo[] };
+export type CozeModelMetadata = { projectId: string; environment: ProjectEnvironment; items: LLMModelInfo[] };
+export type CozeModelExecutionContext = { headers?: Headers | Record<string, string>; signal?: AbortSignal };
+export type CozeCompletionEnvelope = { projectId: string; environment: ProjectEnvironment;
+  requestId: string; result: CompletionResult };
 
 class BridgeError extends Error {
   constructor(readonly status: number, readonly code: string, readonly publicMessage: string) {
@@ -49,11 +56,16 @@ let modelCache: ModelCache | undefined;
 let modelFetch: Promise<LLMModelInfo[]> | undefined;
 let activeCompletions = 0;
 
-function json(value: unknown, status = 200): Response {
+function serializedPayload(value: unknown): string {
   const serialized = JSON.stringify(value);
   if (Buffer.byteLength(serialized, 'utf8') > RESPONSE_LIMIT) {
     throw new BridgeError(502, 'PROVIDER_RESPONSE_TOO_LARGE', '模型返回内容过大');
   }
+  return serialized;
+}
+
+function json(value: unknown, status = 200): Response {
+  const serialized = serializedPayload(value);
   return new Response(serialized, { status, headers: RESPONSE_HEADERS });
 }
 
@@ -155,16 +167,24 @@ async function readRawBody(request: Request): Promise<Uint8Array> {
 
 function projectContext(): ProjectContext {
   const environment = process.env.COZE_PROJECT_ENV;
-  if (process.env.COZE_PROJECT_ID !== PROJECT_ID || (environment !== 'DEV' && environment !== 'PROD')) {
+  if (process.env.COZE_PROJECT_ID !== PROJECT_ID || (environment !== 'DEV' && environment !== 'PROD') ||
+    !process.env.COZE_DEVBOX_ENV?.trim()) {
     throw new BridgeError(503, 'PROJECT_IDENTITY_UNAVAILABLE', '模型项目身份尚未就绪');
   }
   try {
+    // SDK 0.7.32 recognizes workload credentials only outside project mode, and
+    // listModels() only reads COZE_API_TOKEN. Alias the platform-injected identity
+    // in memory after the fixed cloud-project gate; never persist or replace it.
+    const suppliedProjectToken = process.env.COZE_API_TOKEN?.trim();
+    const suppliedWorkloadToken = process.env.COZE_WORKLOAD_IDENTITY_API_KEY?.trim();
+    if (!suppliedProjectToken && suppliedWorkloadToken) process.env.COZE_API_TOKEN = suppliedWorkloadToken;
+    const projectToken = suppliedProjectToken || suppliedWorkloadToken;
+    if (!projectToken) throw new BridgeError(503, 'MODEL_AUTH_UNAVAILABLE', '内置模型授权尚未就绪');
     const config = new Config();
     config.validate();
     // Config can otherwise prefer a desktop personal credential even with project metadata.
     // The execution bridge only accepts the token supplied to this Coze cloud project runtime.
-    const projectToken = process.env.COZE_API_TOKEN?.trim();
-    if (!projectToken || config.apiKey !== projectToken || config.runtimePlatform !== 'cloud' ||
+    if (config.apiKey !== projectToken || config.runtimePlatform !== 'cloud' ||
       config.projectId !== PROJECT_ID || !config.usesUserRuntimeAuth()) {
       throw new BridgeError(503, 'PROJECT_IDENTITY_UNAVAILABLE', '模型项目身份尚未就绪');
     }
@@ -172,6 +192,16 @@ function projectContext(): ProjectContext {
   } catch (error: unknown) {
     if (error instanceof BridgeError) throw error;
     throw new BridgeError(503, 'MODEL_AUTH_UNAVAILABLE', '内置模型授权尚未就绪');
+  }
+}
+
+/** Configuration readiness only; actual model availability still requires SDK metadata/test. */
+export function cozeProjectModelsReady(): boolean {
+  try {
+    projectContext();
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -232,6 +262,10 @@ function parseBody(rawBody: Uint8Array): CompletionBody {
   } catch {
     throw invalidRequest();
   }
+  return validateCompletionBody(value);
+}
+
+function validateCompletionBody(value: unknown): CompletionBody {
   if (!isRecord(value) || Object.keys(value).some(key => ![
     'requestId', 'mode', 'modelId', 'question', 'timeoutMs', 'maxOutputTokens',
   ].includes(key)) || typeof value.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value.requestId) ||
@@ -313,12 +347,12 @@ function mapModelError(error: unknown): BridgeError {
   return new BridgeError(502, 'MODEL_UPSTREAM_UNAVAILABLE', '模型服务暂时不可用');
 }
 
-async function complete(context: ProjectContext, request: Request, body: CompletionBody,
+async function complete(context: ProjectContext, request: CozeModelExecutionContext, body: CompletionBody,
   startedAt: number, expiresAt: number): Promise<CompletionResult> {
   if (Date.now() >= expiresAt) throw new BridgeError(504, 'MODEL_TIMEOUT', '模型响应超时，请稍后重试');
   if (activeCompletions >= CONCURRENT_COMPLETIONS) throw new BridgeError(429, 'MODEL_RATE_LIMITED', '模型请求繁忙，请稍后重试');
   let stopped = false;
-  const client = new LLMClient(context.config, HeaderUtils.extractForwardHeaders(request.headers));
+  const client = new LLMClient(context.config, HeaderUtils.extractForwardHeaders(request.headers ?? new Headers()));
   activeCompletions += 1;
   const operation = (async (): Promise<CompletionResult> => {
     let content = '';
@@ -329,7 +363,7 @@ async function complete(context: ProjectContext, request: Request, body: Complet
       for await (const chunk of client.stream(messagesFor(body), {
         model: body.modelId, thinking: 'disabled', caching: 'disabled', temperature: 0.2,
       })) {
-        if (stopped || request.signal.aborted || Date.now() >= expiresAt) {
+        if (stopped || request.signal?.aborted || Date.now() >= expiresAt) {
           throw new BridgeError(504, 'MODEL_TIMEOUT', '模型响应超时，请稍后重试');
         }
         content += contentText(chunk.content);
@@ -351,6 +385,9 @@ async function complete(context: ProjectContext, request: Request, body: Complet
         if (typeof chunk.id === 'string' && !chunk.id.startsWith('run-')) {
           providerRequestId = providerRequestId ?? safeProviderId(chunk.id);
         }
+      }
+      if (content.includes(context.config.apiKey) || providerRequestId?.includes(context.config.apiKey)) {
+        throw new BridgeError(502, 'MODEL_RESPONSE_INVALID', '模型返回格式不正确');
       }
       if (finishReason !== undefined && finishReason !== 'stop') {
         throw new BridgeError(502, 'MODEL_RESPONSE_INCOMPLETE', '模型回复未完整结束');
@@ -376,6 +413,46 @@ async function complete(context: ProjectContext, request: Request, body: Complet
   }
 }
 
+/** Fixed-project SDK metadata shared by the native account server and HMAC route. */
+export async function cozeProjectModelMetadata(): Promise<CozeModelMetadata> {
+  const context = projectContext();
+  // Do not expose the cache used as the execution allowlist to mutable native consumers.
+  const items = (await availableModels(Date.now() + MODEL_DEADLINE_MS)).map(item => ({ ...item,
+    ...(item.input_types ? { input_types: [...item.input_types] } : {}),
+    ...(item.output_types ? { output_types: [...item.output_types] } : {}),
+  }));
+  const result = { projectId: PROJECT_ID, environment: context.environment, items };
+  serializedPayload(result);
+  return result;
+}
+
+/** In-process execution. Account authorization, reservations and billing remain in Fastify. */
+export async function cozeProjectModelCompletion(input: unknown,
+  executionContext: CozeModelExecutionContext = {}): Promise<CozeCompletionEnvelope> {
+  try {
+    const context = projectContext();
+    const startedAt = Date.now();
+    const body = validateCompletionBody(input);
+    const expiresAt = startedAt + body.timeoutMs;
+    const models = await availableModels(expiresAt);
+    if (!models.some(model => model.model_id === body.modelId)) {
+      throw new BridgeError(400, 'MODEL_NOT_AVAILABLE', '所选模型未在当前项目中开放');
+    }
+    if (executionContext.signal?.aborted) throw new BridgeError(499, 'REQUEST_CANCELLED', '请求已取消');
+    const result = await complete(context, executionContext, body, startedAt, expiresAt);
+    const envelope = { projectId: PROJECT_ID, environment: context.environment, requestId: body.requestId, result };
+    serializedPayload(envelope);
+    return envelope;
+  } catch (error: unknown) {
+    throw mapModelError(error);
+  }
+}
+
+/** Return only a fixed error code, never an upstream message, response body or headers. */
+export function cozeModelFailureCode(error: unknown): string {
+  return mapModelError(error).code;
+}
+
 export async function modelCompletion(request: Request): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname !== BRIDGE_PATH || url.search || !['GET', 'POST'].includes(request.method)) return denyModelCompletion();
@@ -390,23 +467,12 @@ export async function modelCompletion(request: Request): Promise<Response> {
   }
   if (!authenticate(request, credentials, rawBody)) return denyModelCompletion();
   try {
-    const context = projectContext();
-    const startedAt = Date.now();
     if (request.method === 'GET') {
-      const items = await availableModels(startedAt + MODEL_DEADLINE_MS);
-      return json({ projectId: PROJECT_ID, environment: context.environment, items });
+      return json(await cozeProjectModelMetadata());
     }
     if (request.headers.get('content-encoding') && request.headers.get('content-encoding') !== 'identity') throw invalidRequest();
     if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') ?? '')) throw invalidRequest();
-    const body = parseBody(rawBody);
-    const expiresAt = startedAt + body.timeoutMs;
-    const models = await availableModels(expiresAt);
-    if (!models.some(model => model.model_id === body.modelId)) {
-      throw new BridgeError(400, 'MODEL_NOT_AVAILABLE', '所选模型未在当前项目中开放');
-    }
-    if (request.signal.aborted) throw new BridgeError(499, 'REQUEST_CANCELLED', '请求已取消');
-    const result = await complete(context, request, body, startedAt, expiresAt);
-    return json({ projectId: PROJECT_ID, environment: context.environment, requestId: body.requestId, result });
+    return json(await cozeProjectModelCompletion(parseBody(rawBody), request));
   } catch (error: unknown) {
     return failure(error instanceof BridgeError ? error : mapModelError(error));
   }

@@ -1,6 +1,7 @@
 import { createServer } from 'http';
 import { parse } from 'url';
 import next from 'next';
+import { nativeHttpRequest, closeNativeBackend } from './lib/native-backend.server';
 
 const dev = process.env.COZE_PROJECT_ENV !== 'PROD';
 const hostname = process.env.HOSTNAME || 'localhost';
@@ -13,6 +14,11 @@ const handle = app.getRequestHandler();
 app.prepare().then(() => {
   const server = createServer(async (req, res) => {
     try {
+      const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+      if (pathname === '/health' || pathname === '/v1' || pathname.startsWith('/v1/')) {
+        await nativeHttpRequest(req, res);
+        return;
+      }
       const parsedUrl = parse(req.url!, true);
       await handle(req, res, parsedUrl);
     } catch {
@@ -23,7 +29,7 @@ app.prepare().then(() => {
     }
   });
   server.once('error', err => {
-    console.error(err);
+    console.error('HTTP server failed', 'code' in err && typeof err.code === 'string' ? err.code : 'UNKNOWN');
     process.exit(1);
   });
   server.listen(port, () => {
@@ -32,5 +38,8 @@ app.prepare().then(() => {
         dev ? 'development' : process.env.COZE_PROJECT_ENV
       }`,
     );
+  });
+  for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
+    server.close(() => { closeNativeBackend().finally(() => process.exit(0)); });
   });
 });
