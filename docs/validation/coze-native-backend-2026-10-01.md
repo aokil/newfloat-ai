@@ -49,3 +49,19 @@ v41 APK 和冻结服务包保留，无手机操作。图片 OCR／扫描 PDF、�
 ## 平台依据
 
 依据本机 coze-coding-dev-sdk 0.7.32 正式类型及实现，以及 [数据库说明](https://docs.coze.cn/guides_integrate_database)、[身份验证说明](https://docs.coze.cn/guides_integrate_authentication)。部署结构和数据分开；SSL 沿实际URL并保留证书验证，不猜证书或关闭验证。
+
+本轮12文件已同步 5f79dfdbfcb347a27fff93e4a85d724ac1dd5604，远端树／哈希核对一致、本地main／origin/main干净。同步证据 coze-native-workload-sync-2026-10-01.json。08:07 UTC 预览 /health 与受保护诊断返回404，浏览器控制库存超时；已请求用户Pull本轮新补丁并重启预览。未进行真实生成、短信发送、生产部署或手机操作。
+
+## 最新真实运行结果（08:16–08:26 UTC）
+
+- 用户Pull后，DEV健康与受保护诊断均HTTP200：PostgreSQL/schema8、固定项目/cloud/workload身份、短信开关true、9型号真实目录就绪。
+- 正式DEV workload对豆包Mini发出真实文本连接请求，返回OK，prompt/completion/total tokens为62/1/63，862ms。它证明模型链路，不写管理员配置或测试状态、不修改账号／余额。证据coze-native-model-connection-2026-10-01.json。
+- PROD官方database/ensure、supabase/ensure、身份配置读取及秘密保存均code0；当前phase的3个PG/TIYU变量读回值一致。PROD业务数据库端点／库名与DEV不同；短信provider由项目共享。变量保存在DEV secret以供部署读取加密复制，不部署owner OAuth。证据coze-prod-resources-2026-10-01.json。
+- Coze提交列表确认5f79dfd存在，最新d769e9c是以5f79dfd为parent的GitHub合并。任务状态done，无进行中的开发任务。
+- 用户已回复注册，但只读DEV业务PG聚合显示1个已验证启用的普通账号、0管理员；BOOTSTRAP_ADMIN_PHONE与用户重申号码一致，该号码在本DEV库没有账号。未读取密码／会话、未改账号角色或余额。证据coze-native-deployment-preflight-2026-10-01.json。
+- 9项真实元数据缺少SDK定义的可选input_types/output_types；现有保存门槛误把未知当不支持，最小修复进行中。未知能力只允许停用草稿，明确非文本能力拒绝，对应管理员文本测试通过后方可启用。
+- 尚未部署PROD、配置／启用模型、完成指定号码真实注册及管理员验收。DEV／PROD账号、模型配置和测试记录独立；手机／APK保持暂停。
+
+## 可选模型能力字段修复（08:30 UTC）
+
+SDK元数据的input_types/output_types可选；本项目真实9项均未声明。已修正为仅非空列表明确排除text才拒绝，不补造能力；允许停用草稿，原有真实管理员测试／配置revision／启用门槛保持。两份admin-routes.js语法、TypeScript、完整Next webpack生产构建及Node24打包通过；未新增／运行测试。当前DEV后台及Mini真实链路已运行，但本项保存修复需新代码Pull后生效；指定手机号注册／管理员和实际模型配置／启用、PROD部署仍未完成。

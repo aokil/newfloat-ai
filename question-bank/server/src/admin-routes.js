@@ -106,7 +106,8 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,mo
     if(config.execution==='coze'&&(!old||(oldConfig.execution??'official')!=='coze'||oldConfig.modelId!==config.modelId||oldConfig.catalogKey!==config.catalogKey)){
       const metadata=await cozeMetadata(),match=metadata.items.find(item=>item.model_id===config.modelId);
       if(!match)throw new ApiError(422,'VALIDATION_FAILED','Coze 真实目录中没有该模型 ID，请重新选择');
-      if(!match.input_types?.some(type=>type.toLowerCase()==='text')||!match.output_types?.some(type=>type.toLowerCase()==='text'))throw new ApiError(422,'VALIDATION_FAILED','平台元数据尚未确认该模型支持文本输入和输出');
+      // Optional or empty lists leave text capability unverified; real testing still gates enablement.
+      if([match.input_types,match.output_types].some(types=>Array.isArray(types)&&types.length>0&&!types.some(type=>typeof type==='string'&&type.toLowerCase()==='text')))throw new ApiError(422,'VALIDATION_FAILED','平台元数据表明该模型不支持文本输入或输出');
       if(cozeCatalogKey(match.model_id)!==config.catalogKey)throw new ApiError(422,'VALIDATION_FAILED','模型 ID 的真实型号族与点数目录不匹配或无法确认，请重新选择');
       const displayName=match.show_name?.trim()||match.model_name?.trim()||match.model_id;
       verified={modelId:config.modelId,catalogKey:config.catalogKey,provider:config.provider,displayName};
