@@ -176,7 +176,16 @@ window.FloatWorkspace = function (ctx) {
     // Repository-owned SVG markup from the same icon package as the approved prototype.
     span.innerHTML = typeof source === 'string' ? source : (source.svg || ''); return span;
   }
-  async function getCatalog() { catalog = await api('/v1/models/catalog'); if (Number.isFinite(catalog.pointsAvailable)) mergeSession({account: {...account(), pointsAvailable: catalog.pointsAvailable}}); return catalog; }
+  async function getCatalog() {
+    try { catalog = await api('/v1/models/catalog'); if (Number.isFinite(catalog.pointsAvailable)) mergeSession({account: {...account(), pointsAvailable: catalog.pointsAvailable}}); return catalog; }
+    catch (error) { catalog = null; throw error; }
+  }
+  function modelCatalogHint(error) {
+    return error.code === 'MODEL_SERVICE_NOT_DEPLOYED' ? '需要先更新配套后台，再重新读取模型。仅拉取 Coze 页面代码不会更新后台。' : '请检查连接后重试，模型状态确认前不会发起调用。';
+  }
+  function modelCatalogFailure(error, retry) {
+    return el('div', {}, el('p', {class: 'error-text', role: 'alert'}, error.message || '模型目录读取失败'), el('p', {class: 'muted'}, modelCatalogHint(error)), button('重新读取模型', retry));
+  }
   function selectedModel() { return catalog?.items?.find(m => m.key === prefs.modelKey); }
   function selectedLabel() { return prefs.modelKey === 'byok' ? (keySession?.name || '自带模型') : (selectedModel()?.name || '选择模型'); }
   async function modelPage(alive) {
@@ -192,7 +201,7 @@ window.FloatWorkspace = function (ctx) {
         for (const m of items) {
           const selected = prefs.modelKey === m.key;
           const b = button(m.name, () => { savePreference('modelKey', m.key); notify('已选择 ' + m.name); return show('userModels'); }, 'float-model-option' + (selected ? ' selected' : ''));
-          replace(b, el('span', {}, m.name, el('small', {}, m.available ? m.pointsPerCall + ' 点 / 次' : ({MODEL_NOT_CONFIGURED:'尚未配置',MODEL_CONFIG_MISMATCH:'配置待调整',MODEL_KEY_NOT_CONFIGURED:'尚未配置密钥',MODEL_NOT_VERIFIED:'尚未验证',MODEL_DISABLED:'暂时停用',INSUFFICIENT_POINTS:'可用点数不足'}[m.unavailableReason] || '暂不可用'))), selected ? icon('check') : el('strong', {}, m.pointsPerCall + ' 点'));
+          replace(b, el('span', {}, m.name, el('small', {}, m.available ? m.pointsPerCall + ' 点 / 次' : ({MODEL_NOT_CONFIGURED:'尚未配置',MODEL_CONFIG_MISMATCH:'配置待调整',MODEL_KEY_NOT_CONFIGURED:'尚未配置密钥',MODEL_NOT_VERIFIED:'尚未验证',MODEL_DISABLED:'暂时停用',COZE_INTEGRATION_NOT_READY:'Coze 内置集成尚未就绪',INSUFFICIENT_POINTS:'可用点数不足'}[m.unavailableReason] || '暂不可用'))), selected ? icon('check') : el('strong', {}, m.pointsPerCall + ' 点'));
           b.disabled = !m.available; b.setAttribute('aria-pressed', String(selected)); section.append(b);
         }
         area.append(section);
@@ -200,7 +209,7 @@ window.FloatWorkspace = function (ctx) {
       area.append(el('section', {class: 'float-model-group'}, el('h2', {}, brandIcon('deepseek'), '自带模型'),
         menu(keySession ? keySession.name : '接入 DeepSeek / 自定义模型', 'plus', () => show('byok'), '不扣平台点数')));
       main.append(el('p', {class: 'float-caption'}, '基础功能需可用点数大于 0 · 内置模型按次计点'));
-    } catch (error) { if (alive()) { replace(area, el('p', {class: 'error-text'}, error.message), button('重试', () => show('userModels'))); } }
+    } catch (error) { if (alive()) replace(area, modelCatalogFailure(error, () => show('userModels'))); }
   }
   function modelSettingsPage() {
     loadPreferences(); pageHeader('模型设置', 'userModels');
@@ -212,7 +221,10 @@ window.FloatWorkspace = function (ctx) {
   }
   async function byokPage(alive) {
     loadPreferences(); pageHeader('自带模型', 'userModels');
-    const data = catalog || await getCatalog(); if (!alive()) return;
+    const area = el('div', {}, el('p', {role: 'status', class: 'muted'}, '正在读取服务商…')); main.append(area);
+    let data;
+    try { data = catalog || await getCatalog(); if (!alive()) return; area.remove(); }
+    catch (error) { if (alive()) replace(area, modelCatalogFailure(error, () => show('byok'))); return; }
     const providers = Object.fromEntries(data.byokProviders.map(p => [p.id, p.name]));
     const provider = select('服务商', providers, keySession?.provider || (providers.deepseek ? 'deepseek' : Object.keys(providers)[0]));
     const model = field('模型 ID', 'text', keySession?.modelId || 'deepseek-chat');
@@ -252,15 +264,18 @@ window.FloatWorkspace = function (ctx) {
         replace(result, el('p', {class: 'error-text'}, message)); notify(message, true);
       } finally { if (alive()) updateGate(); }
     }); recovery.hidden = true;
-    const form = el('form', {class: 'float-search-form'}, top, question.node, gate, submit, recovery);
-    let catalogReady = false;
+    const retryCatalog = button('重新读取模型', () => loadCatalog()); retryCatalog.hidden = true;
+    const form = el('form', {class: 'float-search-form'}, top, question.node, gate, retryCatalog, submit, recovery);
+    let catalogReady = false, catalogError = null, catalogLoading = false;
     function updateGate() {
       const model = selectedModel(), byok = prefs.modelKey === 'byok';
       const pending = operation?.uncertain === true;
       const usable = !pending && catalogReady && points() > 0 && (byok ? !!keySession : !!model?.available && points() >= model.pointsPerCall);
       submit.disabled = !usable;
       recovery.hidden = !pending; question.input.readOnly = pending;
-      gate.textContent = pending ? '上次请求结果待确认，请先找回结果；查询回执不扣点，也不需要重新提供 Key。' : !catalogReady ? '正在读取模型可用状态…' : points() <= 0 ? '可用点数为 0，请先补充点数。已有题库仍可查看。' : (byok && !keySession) ? '请重新输入本次会话的 API Key。' : !usable ? '请先选择已配置且可用的模型。' : byok ? '自带模型不扣平台点数，费用由服务商结算。' : '本次调用成功后消耗 ' + model.pointsPerCall + ' 点。';
+      retryCatalog.hidden = !catalogError || pending; retryCatalog.disabled = catalogLoading;
+      gate.className = catalogError && !pending ? 'error-text' : 'muted';
+      gate.textContent = pending ? '上次请求结果待确认，请先找回结果；查询回执不扣点，也不需要重新提供 Key。' : !catalogReady ? catalogError ? (catalogError.message || '模型目录读取失败') + '。' + modelCatalogHint(catalogError) : '正在读取模型可用状态…' : points() <= 0 ? '可用点数为 0，请先补充点数。已有题库仍可查看。' : (byok && !keySession) ? '请重新输入本次会话的 API Key。' : !usable ? '请先选择已配置且可用的模型。' : byok ? '自带模型不扣平台点数，费用由服务商结算。' : '本次调用成功后消耗 ' + model.pointsPerCall + ' 点。';
     }
     function complete(response, query) {
       if (response.status !== 'completed') throw Error('模型结果尚未确认，请稍后找回结果');
@@ -292,8 +307,14 @@ window.FloatWorkspace = function (ctx) {
         if (alive()) { replace(result, el('p', {class: 'error-text'}, error.message)); notify(error.message, true); }
       } finally { delete body.byok?.apiKey; updateGate(); submit.classList.remove('is-busy'); }
     }); main.append(form, result);
-    try { await getCatalog(); if (alive()) { catalogReady = true; replace(top.firstChild, el('span', {}, selectedLabel())); updateGate(); } }
-    catch (error) { if (alive()) { gate.textContent = '无法确认模型可用状态，请打开模型选择后重试。'; notify(error.message, true); } }
+    async function loadCatalog() {
+      if (catalogLoading || !alive()) return;
+      catalogLoading = true; catalogReady = false; catalogError = null; updateGate();
+      try { await getCatalog(); if (alive()) { catalogReady = true; replace(top.firstChild, el('span', {}, selectedLabel())); } }
+      catch (error) { if (alive()) catalogError = error; }
+      finally { catalogLoading = false; if (alive()) updateGate(); }
+    }
+    await loadCatalog();
   }
   function dateOnly(date) { const d = new Date(date); return Number.isNaN(d.getTime()) ? '—' : d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
   function editBank(bank, done) {

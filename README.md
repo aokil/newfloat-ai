@@ -5,7 +5,7 @@
 ## 实际网站代码
 
 - [网站页面与素材](question-bank/server/public/)：头像、点数权益、使用帮助、模型选择、题库和导入复审。
-- [配套后端](question-bank/server/src/)：统一账号、私库导入／删除、模型目录、点数结算和结果回执。当前源码版本为 `0.5.1 / SQLite schema8`。
+- [配套后端](question-bank/server/src/)：统一账号、私库导入／删除、模型目录、点数结算和结果回执。当前源码版本为 `0.5.2 / SQLite schema8`。
 - [部署说明](question-bank/server/DEPLOYMENT.md)、[点数模型协议](contracts/points-models-v1.md)、[使用帮助](docs/help/points-and-models.md)。
 - [网站实现与剩余项](docs/validation/website-sync-2026-10-01.md)、[后端实现记录](docs/validation/points-backend-2026-10-01.md)。
 
@@ -14,6 +14,8 @@
 网站服务保存在独立的 `question-bank/server/` 目录；仓库根的 Next.js 项目继续承担 HTTPS 网关，运行参数见 [GATEWAY.md](GATEWAY.md)。源码不包含运行数据库、用户上传原件、真实环境凭据或安装包。
 
 Coze DEV 预览会直接读取已 Pull 的网站静态文件；生产与业务 API 继续走原网关。拉取后重启预览即可查看当前页面，业务功能是否可用仍取决于配套后端部署与真实配置。
+
+2026-10-01 已确认预览模型选择失败的原因：新静态页面已经拉取，但旧后台的 `/v1/models/catalog` 与 `/v1/admin/coze-models` 返回 404。0.5.2 补明确原因及持久重试反馈；真正读取目录还须升级后台，反复 Pull 或重试不能替代部署。见 [定位记录](docs/validation/model-selection-failure-2026-10-01.md)。
 
 ## Coze 内置语言模型
 
