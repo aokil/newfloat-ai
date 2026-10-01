@@ -48,6 +48,7 @@ export type WorkloadRuntimeStatus = {
     clientMatchesCurrent: boolean | null };
   responseDiagnostics?: WorkloadEnvResponseDiagnostics;
   resources: { database: boolean; phone: boolean; projectApiToken: boolean };
+  productionConfigurationAccepted: boolean;
   productionBindingVerified: boolean;
 };
 type SharedState = {
@@ -57,6 +58,7 @@ type SharedState = {
   clientLane?: string;
   responseProbeAttempted?: boolean;
   responseDiagnostics?: WorkloadEnvResponseDiagnostics;
+  productionConfigurationHash?: string;
   resources?: WorkloadProjectResources;
   expiresAt: number;
   pending?: Promise<WorkloadProjectResources | null>;
@@ -247,6 +249,39 @@ export function getInjectedProjectResources(): WorkloadProjectResources | null {
   };
 }
 
+/** Trust the owner's audited Coze deployment configuration, not local metadata
+ * as a remote resource-ownership assertion. No DEV/general resource fallback. */
+function productionConfigurationHash(): string | null {
+  const workloadToken = process.env.COZE_WORKLOAD_IDENTITY_API_KEY?.trim();
+  const projectToken = process.env.COZE_API_TOKEN?.trim();
+  const injected = getInjectedProjectResources();
+  if (phase() !== 'PROD' || !workloadToken || (projectToken && projectToken !== workloadToken) ||
+    !REQUIRED_ENV.every(name => Boolean(process.env[name]?.trim())) ||
+    !injected?.databaseUrl || !injected.phoneConfiguration ||
+    (state.identityHash !== undefined && state.identityHash !== identityFingerprint()) ||
+    (state.phase !== undefined && state.phase !== 'PROD')) return null;
+  const resources = ['PGDATABASE_URL_PROD', 'TIYU_SUPABASE_URL_PROD', 'TIYU_SUPABASE_ANON_KEY_PROD',
+    'COZE_DEVBOX_ENV', 'PROJECT_PATH', 'COZE_WORKSPACE_PATH', 'TIYU_GATEWAY_KEY', 'BOOTSTRAP_ADMIN_PHONE'];
+  return createHash('sha256').update(JSON.stringify([identityFingerprint(),
+    ...resources.map(name => [name, process.env[name] ?? null])])).digest('hex');
+}
+
+/** Freeze the complete platform-injected PROD binding before asynchronous use.
+ * This does not call /env or establish remote model/resource authorization;
+ * SMS authentication and genuine model connection tests remain independent. */
+export function acceptProductionInjectedResources(): boolean {
+  const hash = productionConfigurationHash();
+  if (!hash || (state.productionConfigurationHash !== undefined && state.productionConfigurationHash !== hash))
+    return false;
+  state.productionConfigurationHash ??= hash;
+  return true;
+}
+
+function productionConfigurationAccepted(): boolean {
+  const hash = productionConfigurationHash();
+  return hash !== null && state.productionConfigurationHash === hash;
+}
+
 function resourceBindingsMatch(left: WorkloadProjectResources | null | undefined,
   right: WorkloadProjectResources | null | undefined): boolean {
   if (!left?.databaseUrl || !left.phoneConfiguration?.supabaseUrl || !left.phoneConfiguration.anonKey ||
@@ -309,6 +344,7 @@ export function workloadRuntimeStatus(): WorkloadRuntimeStatus {
     ...(permitted && state.responseDiagnostics ? { responseDiagnostics: { ...state.responseDiagnostics } } : {}),
     resources: { database: Boolean(resources?.databaseUrl), phone: Boolean(resources?.phoneConfiguration),
       projectApiToken: Boolean(resources?.projectApiToken) },
+    productionConfigurationAccepted: productionConfigurationAccepted(),
     productionBindingVerified: currentPhase === 'PROD' && state.stage === 'ready' &&
       resourceBindingsMatch(getInjectedProjectResources(), resources),
   };

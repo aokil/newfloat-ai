@@ -39,7 +39,7 @@ type PhoneStatus = { ready: boolean; code: string | null; backendReady: boolean;
 type StatusPayload = { projectId: string; environment: Environment | null; ready: boolean;
   identity: { ready: boolean; code: string | null; runtimePlatform: 'cloud' | 'local' | null;
     credentialSource?: 'workload-token' | 'project-token'; scopedDatabaseInjected?: boolean;
-    scopedPhoneInjected?: boolean; verification?: 'devbox' | 'production-workload';
+    scopedPhoneInjected?: boolean; verification?: 'devbox' | 'production-injected';
     diagnostics: CozeRuntimeIdentityDiagnostics };
   backend: BackendStatus; models: ModelsStatus; phone: PhoneStatus;
   workload?: ReturnType<typeof workloadRuntimeStatus> };
@@ -163,7 +163,7 @@ export async function GET(request: Request): Promise<Response> {
   const knownEnvironment = environment === 'DEV' || environment === 'PROD' ? environment : null;
   let config: Config;
   let credentialSource: 'workload-token' | 'project-token';
-  let runtimeIdentity: 'devbox' | 'production-workload';
+  let runtimeIdentity: 'devbox' | 'production-injected';
   try {
     if (process.env.COZE_PROJECT_ID !== PROJECT_ID || knownEnvironment === null || !nativeModelBridge().ready) {
       return response(unavailable('PROJECT_IDENTITY_UNAVAILABLE', knownEnvironment));

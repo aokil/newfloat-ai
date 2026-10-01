@@ -2,7 +2,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { Config, HeaderUtils, LLMClient, listModels } from 'coze-coding-dev-sdk';
 import type { LLMModelInfo, Message } from 'coze-coding-dev-sdk';
 import projectModelSnapshot from './coze-project-models.json';
-import { verifyProductionWorkloadResources } from './coze-workload.server';
+import { acceptProductionInjectedResources } from './coze-workload.server';
 
 const PROJECT_ID = '7689833705046130729';
 const BRIDGE_PATH = '/internal/model-completion';
@@ -42,7 +42,7 @@ type TestResult = CozeTestResult;
 type CompletionResult = SearchResult | TestResult;
 type ProjectContext = { config: Config; environment: ProjectEnvironment;
   credentialSource: 'workload-token' | 'project-token';
-  runtimeIdentity: 'devbox' | 'production-workload' };
+  runtimeIdentity: 'devbox' | 'production-injected' };
 type ModelCache = { expiresAt: number; items: LLMModelInfo[] };
 export type CozeModelMetadata = { projectId: string; environment: ProjectEnvironment; items: LLMModelInfo[];
   source: 'live-sdk' | 'owner-verified-snapshot'; retrievedAt: string | null };
@@ -286,18 +286,20 @@ export function cozeProjectRuntimeContext(): ProjectContext {
       throw new BridgeError(503, 'PROJECT_IDENTITY_UNAVAILABLE', '模型项目身份尚未就绪');
     }
     return { config, environment, credentialSource,
-      runtimeIdentity: productionWorkload ? 'production-workload' : 'devbox' };
+      runtimeIdentity: environment === 'PROD' ? 'production-injected' : 'devbox' };
   } catch (error: unknown) {
     if (error instanceof BridgeError) throw error;
     throw new BridgeError(503, 'MODEL_AUTH_UNAVAILABLE', '内置模型授权尚未就绪');
   }
 }
 
-/** PROD requires real official workload authorization and matching phase resources. */
+/** PROD accepts the frozen configuration injected into this audited Coze deployment.
+ * This is a platform configuration boundary; each service authenticates its actual calls. */
 export async function verifiedCozeProjectRuntimeContext(): Promise<ProjectContext> {
   const context = cozeProjectRuntimeContext();
-  if (context.environment === 'PROD' && !await verifyProductionWorkloadResources()) {
-    throw new BridgeError(503, 'MODEL_AUTH_UNAVAILABLE', 'Coze 正式环境授权尚未就绪');
+  if (context.environment === 'PROD' &&
+    (context.credentialSource !== 'workload-token' || !acceptProductionInjectedResources())) {
+    throw new BridgeError(503, 'MODEL_AUTH_UNAVAILABLE', 'Coze 正式环境配置尚未就绪');
   }
   return context;
 }

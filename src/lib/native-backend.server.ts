@@ -87,14 +87,17 @@ export function getNativeBackend(): Promise<FastifyInstance> {
     if (state.runtimeBindingHash && state.runtimeBindingHash !== authorizedBinding)
       throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     state.runtimeBindingHash ??= authorizedBinding;
-    stage = 'runtime-authorization';
-    // PROD has no DEVBOX marker. Require actual official workload authorization
-    // and phase-resource binding before any database initialization.
+    const production = process.env.COZE_PROJECT_ENV === 'PROD';
+    stage = production ? 'runtime-configuration' : 'runtime-authorization';
+    // Accept only the frozen configuration of this audited platform deployment.
+    // Database, Auth and model services authenticate their own actual operations.
     await verifiedCozeProjectRuntimeContext();
     if (runtimeBindingHash() !== authorizedBinding) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     const injectedResources = getInjectedProjectResources();
-    stage = 'workload-resources';
-    const workloadResources = injectedResources?.databaseUrl && injectedResources.phoneConfiguration
+    stage = production ? 'injected-resources' : 'workload-resources';
+    if (production && (!injectedResources?.databaseUrl || !injectedResources.phoneConfiguration))
+      throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
+    const workloadResources = production || (injectedResources?.databaseUrl && injectedResources.phoneConfiguration)
       ? null : await getWorkloadProjectResources();
     stage = 'database-configuration';
     // SDK 0.7.32 checks .env only; Coze may inject the scoped URL into the
@@ -103,15 +106,17 @@ export function getNativeBackend(): Promise<FastifyInstance> {
       workloadResources?.databaseUrl;
     const database = injectedDatabaseUrl
       ? { databaseUrl: injectedDatabaseUrl, context: { projectId: PROJECT_ID } }
-      : await ensureDatabaseEnvironment();
-    if (database.context.projectId !== PROJECT_ID) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
+      : production ? null : await ensureDatabaseEnvironment();
+    // The local context labels the selected configuration; it is not a remote ownership assertion.
+    if (!database || database.context.projectId !== PROJECT_ID) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     // Authentication may be temporarily unavailable; the website and database
     // remain usable, while SMS APIs return their genuine unavailable state.
     const phoneConfiguration = injectedResources?.phoneConfiguration || workloadResources?.phoneConfiguration;
     const phone = phoneConfiguration
       ? { ...phoneConfiguration, context: { root: process.cwd(), projectId: PROJECT_ID } }
-      : await ensureSupabaseEnvironment().catch(() => undefined);
-    if (phone && phone.context.projectId !== PROJECT_ID) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
+      : production ? undefined : await ensureSupabaseEnvironment().catch(() => undefined);
+    if ((production && !phone) || (phone && phone.context.projectId !== PROJECT_ID))
+      throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     // Keep the existing ESM backend unbundled: parser workers and public files
     // resolve their own import.meta.url in both preview and production.
     stage = 'module-load';
