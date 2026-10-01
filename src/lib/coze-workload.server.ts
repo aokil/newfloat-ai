@@ -11,11 +11,21 @@ const REQUIRED_ENV = [
   'COZE_WORKLOAD_ACCESS_TOKEN_ENDPOINT',
   'COZE_OUTBOUND_AUTH_ENDPOINT',
 ] as const;
+const ENDPOINT_ENV = [
+  'COZE_WORKLOAD_IDENTITY_TOKEN_ENDPOINT',
+  'COZE_WORKLOAD_ACCESS_TOKEN_ENDPOINT',
+  'COZE_OUTBOUND_AUTH_ENDPOINT',
+] as const;
 
 type Phase = 'DEV' | 'PROD';
 type Stage = 'idle' | 'loading' | 'ready' | 'cooldown' | 'blocked';
+type Operation = 'idle' | 'construct' | 'access-token' | 'project-env' | 'parse' | 'binding';
+type FailureReason = 'missing-project' | 'missing-environment' | 'permission' |
+  'unsupported-runtime' | 'configuration-not-found' | 'invalid-parameter' | 'other';
 type ErrorType = 'ConfigurationError' | 'TokenRetrievalError' | 'TokenExchangeError' |
   'WorkloadIdentityError' | 'NetworkError' | 'APIError' | 'Error';
+type EndpointFormat = { parseable: boolean; httpOrHttps: boolean; noCredentials: boolean;
+  noQuery: boolean; noHash: boolean; trailingSlash: boolean; endsWithEnv: boolean };
 export type WorkloadProjectResources = {
   databaseUrl?: string;
   phoneConfiguration?: { supabaseUrl: string; anonKey: string };
@@ -26,6 +36,12 @@ export type WorkloadRuntimeStatus = {
   stage: Stage;
   httpStatus: number | null;
   errorType: ErrorType | null;
+  operation: Operation;
+  accessTokenVerified: boolean;
+  failureReason: FailureReason | null;
+  businessCode: number | null;
+  endpoints: Record<(typeof ENDPOINT_ENV)[number], EndpointFormat>;
+  laneConfigured: boolean;
   resources: { database: boolean; phone: boolean; projectApiToken: boolean };
   productionBindingVerified: boolean;
 };
@@ -40,11 +56,17 @@ type SharedState = {
   stage: Stage;
   httpStatus: number | null;
   errorType: ErrorType | null;
+  // Optional for an already initialized v1 global state during a DEV hot reload.
+  operation?: Operation;
+  accessTokenVerified?: boolean;
+  failureReason?: FailureReason | null;
+  businessCode?: number | null;
 };
 const STATE_KEY = Symbol.for('float-ai/coze-workload-resources/v1');
 const sharedGlobal = globalThis as typeof globalThis & { [STATE_KEY]?: SharedState };
 const state = sharedGlobal[STATE_KEY] ??= {
   expiresAt: 0, retryAt: 0, stage: 'idle', httpStatus: null, errorType: null,
+  operation: 'idle', accessTokenVerified: false, failureReason: null, businessCode: null,
 };
 
 // The SDK token cache is process-wide. A changed identity requires a fresh process;
@@ -74,12 +96,54 @@ function environmentPresence(): WorkloadRuntimeStatus['environment'] {
     WorkloadRuntimeStatus['environment'];
 }
 
+function endpointFormat(value: string | undefined): EndpointFormat {
+  const flags: EndpointFormat = { parseable: false, httpOrHttps: false, noCredentials: false,
+    noQuery: false, noHash: false, trailingSlash: false, endsWithEnv: false };
+  if (!value || value.length > 8192) return flags;
+  try {
+    const url = new URL(value);
+    return { parseable: true, httpOrHttps: url.protocol === 'http:' || url.protocol === 'https:',
+      noCredentials: !url.username && !url.password,
+      noQuery: !url.href.includes('?'), noHash: !url.href.includes('#'),
+      trailingSlash: url.pathname.endsWith('/'), endsWithEnv: url.pathname.endsWith('/env') };
+  } catch { return flags; }
+}
+
+function endpointFormats(): WorkloadRuntimeStatus['endpoints'] {
+  return Object.fromEntries(ENDPOINT_ENV.map(name => [name, endpointFormat(process.env[name])])) as
+    WorkloadRuntimeStatus['endpoints'];
+}
+
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function failureDetails(error: unknown): Pick<WorkloadRuntimeStatus, 'httpStatus' | 'errorType'> {
-  const result: Pick<WorkloadRuntimeStatus, 'httpStatus' | 'errorType'> = { httpStatus: null, errorType: null };
+/** Classify only upstream text inside the SDK's fixed error templates.
+ * Never retain that text, endpoint URLs, response bodies or token descriptions. */
+function upstreamFailureReason(message: string): FailureReason {
+  const value = message.toLowerCase();
+  const missing = /\b(?:missing|required|not\s+provided|not\s+found|empty)\b|缺少|缺失|未提供|不存在|为空/.test(value);
+  if ((/\b(?:project_id|project[ _-]id)\b|项目(?:id|标识)/.test(value) && missing) ||
+    /\bmissing\s+project\b(?!\s+(?:env|environment))|\bproject\s+(?:is\s+)?(?:missing|required|not\s+found)\b|缺少项目|项目缺失/.test(value))
+    return 'missing-project';
+  if (/\b(?:environment|project_env|projectenv|project_environment|env)\b|环境/.test(value) && missing)
+    return 'missing-environment';
+  if (/\b(?:permission|forbidden|unauthorized|insufficient_scope|access\s+denied|not\s+allowed)\b|无权限|没有权限|权限不足|禁止访问|未授权/.test(value))
+    return 'permission';
+  if ((/\b(?:runtime|platform)\b|运行时|运行环境|平台/.test(value)) &&
+    /\b(?:unsupported|not\s+supported)\b|不支持/.test(value)) return 'unsupported-runtime';
+  if (/\b(?:configuration|config|secret|secrets)\b|配置|密钥/.test(value) &&
+    /\b(?:not\s+found|missing|unavailable|does\s+not\s+exist)\b|未找到|不存在|缺失|未配置/.test(value))
+    return 'configuration-not-found';
+  if (/\b(?:invalid|malformed|bad)\s+(?:request|parameter|parameters|param|argument|arguments)\b|\b(?:parameter|parameters|param|argument|arguments)\b.*\b(?:invalid|malformed|required)\b|参数错误|参数无效|参数不合法|缺少参数/.test(value))
+    return 'invalid-parameter';
+  return 'other';
+}
+
+function failureDetails(error: unknown): Pick<WorkloadRuntimeStatus,
+  'httpStatus' | 'errorType' | 'failureReason' | 'businessCode'> {
+  const result: Pick<WorkloadRuntimeStatus, 'httpStatus' | 'errorType' | 'failureReason' | 'businessCode'> =
+    { httpStatus: null, errorType: null, failureReason: 'other', businessCode: null };
   if (!record(error)) return result;
   const names: readonly string[] = ['ConfigurationError', 'TokenRetrievalError', 'TokenExchangeError',
     'WorkloadIdentityError', 'NetworkError', 'APIError', 'Error'];
@@ -90,9 +154,23 @@ function failureDetails(error: unknown): Pick<WorkloadRuntimeStatus, 'httpStatus
   }
   // This SDK exposes some HTTP failures only through fixed message templates.
   // Retain the numeric status alone; never return the message or response body.
-  if (result.httpStatus === null && typeof error.message === 'string') {
-    const matched = error.message.match(/\b(?:HTTP |request failed with status )([1-5]\d{2})\b/);
-    if (matched) result.httpStatus = Number(matched[1]);
+  if (typeof error.message === 'string' && error.message.length <= 8192) {
+    const message = error.message;
+    if (result.httpStatus === null) {
+      const matched = message.match(/\b(?:HTTP |request failed with status )([1-5]\d{2})\b/);
+      if (matched) result.httpStatus = Number(matched[1]);
+    }
+    const apiError = message.match(/^(?:Project environment variables|Integration credential) API error: code=(-?\d{1,15}), msg=([\s\S]*)$/);
+    if (apiError) {
+      const code = Number(apiError[1]);
+      if (Number.isSafeInteger(code)) result.businessCode = code;
+      result.failureReason = upstreamFailureReason(apiError[2]);
+    } else {
+      const httpError = message.match(/^(?:Client|Server) error \([1-5]\d{2}\): (?:Project environment variables|Integration credential) request failed with status [1-5]\d{2}: ([\s\S]*)$/);
+      const tokenError = message.match(/^Token request failed: ([\s\S]*)$/);
+      const upstream = httpError?.[1] ?? tokenError?.[1];
+      if (upstream !== undefined) result.failureReason = upstreamFailureReason(upstream);
+    }
   }
   return result;
 }
@@ -174,6 +252,7 @@ export async function verifyProductionWorkloadResources(): Promise<boolean> {
   try {
     // Existing single-flight/cache performs the official OAuth exchange and /env request.
     const official = await getWorkloadProjectResources();
+    if (official && state.stage === 'ready') state.operation = 'binding';
     return phase() === currentPhase && identityFingerprint() === identityHash && state.identityHash === identityHash &&
       state.phase === currentPhase && state.stage === 'ready' && state.expiresAt > Date.now() &&
       resourceBindingsMatch(injected, getInjectedProjectResources()) &&
@@ -195,6 +274,8 @@ export function workloadRuntimeStatus(): WorkloadRuntimeStatus {
     state.resources = undefined;
     state.expiresAt = 0;
     state.stage = 'idle';
+    state.operation = 'idle';
+    state.accessTokenVerified = false;
   }
   const resources = permitted && state.phase === currentPhase && state.expiresAt > now ? state.resources : undefined;
   return {
@@ -202,6 +283,12 @@ export function workloadRuntimeStatus(): WorkloadRuntimeStatus {
     stage: permitted ? state.stage : 'blocked',
     httpStatus: permitted ? state.httpStatus : null,
     errorType: permitted ? state.errorType : 'ConfigurationError',
+    operation: permitted ? state.operation ?? 'idle' : 'idle',
+    accessTokenVerified: permitted && state.accessTokenVerified === true,
+    failureReason: permitted ? state.failureReason ?? null : null,
+    businessCode: permitted ? state.businessCode ?? null : null,
+    endpoints: endpointFormats(),
+    laneConfigured: Boolean(process.env.COZE_SERVER_ENV?.trim() && process.env.COZE_SERVER_ENV?.trim() !== 'NONE'),
     resources: { database: Boolean(resources?.databaseUrl), phone: Boolean(resources?.phoneConfiguration),
       projectApiToken: Boolean(resources?.projectApiToken) },
     productionBindingVerified: currentPhase === 'PROD' && state.stage === 'ready' &&
@@ -227,12 +314,23 @@ export async function getWorkloadProjectResources(): Promise<WorkloadProjectReso
   if (!state.pending) {
     state.phase = currentPhase;
     state.stage = 'loading';
+    state.operation = 'construct';
+    state.accessTokenVerified = false;
+    state.failureReason = null;
+    state.businessCode = null;
     state.pending = Promise.resolve().then(async () => {
       try {
         if (phase() !== currentPhase || identityFingerprint() !== state.identityHash)
           throw new Error('WORKLOAD_RUNTIME_CONTEXT_CHANGED');
         state.client ??= new Client({ timeoutMs: 10_000 });
+        state.operation = 'access-token';
+        // Public SDK method, same Client/cache. Discard the token immediately;
+        // project-env is not marked until this operation actually succeeds.
+        await state.client.getAccessToken();
+        state.accessTokenVerified = true;
+        state.operation = 'project-env';
         const values = await state.client.getProjectEnvVars();
+        state.operation = 'parse';
         if (phase() !== currentPhase || identityFingerprint() !== state.identityHash ||
           !REQUIRED_ENV.every((name) => Boolean(process.env[name]?.trim())))
           throw new Error('WORKLOAD_RUNTIME_CONTEXT_CHANGED');
@@ -250,6 +348,8 @@ export async function getWorkloadProjectResources(): Promise<WorkloadProjectReso
         state.stage = 'ready';
         state.httpStatus = null;
         state.errorType = null;
+        state.failureReason = null;
+        state.businessCode = null;
         return resources;
       } catch (error: unknown) {
         const details = failureDetails(error);
@@ -259,6 +359,8 @@ export async function getWorkloadProjectResources(): Promise<WorkloadProjectReso
         state.stage = 'cooldown';
         state.httpStatus = details.httpStatus;
         state.errorType = details.errorType;
+        state.failureReason = details.failureReason;
+        state.businessCode = details.businessCode;
         return null;
       } finally {
         state.pending = undefined;
