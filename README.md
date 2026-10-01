@@ -1,4 +1,19 @@
-# projects
+# Float AI · 题屿
+
+仓库包含 Coze HTTPS 入口网关，以及实际网站和配套题库服务源码。
+
+## 实际网站代码
+
+- [网站页面与素材](question-bank/server/public/)：头像、点数权益、使用帮助、模型选择、题库和导入复审。
+- [配套后端](question-bank/server/src/)：统一账号、私库导入／删除、模型目录、点数结算和结果回执。当前源码版本为 `0.5.0 / SQLite schema8`。
+- [部署说明](question-bank/server/DEPLOYMENT.md)、[点数模型协议](contracts/points-models-v1.md)、[使用帮助](docs/help/points-and-models.md)。
+- [网站实现与剩余项](docs/validation/website-sync-2026-10-01.md)、[后端实现记录](docs/validation/points-backend-2026-10-01.md)。
+
+2026-10-01 同步的是源码。生产尚未升级；服务端和网页需要一起部署，内置模型需要管理员绑定真实型号、测试并启用。Git 提交不代表已部署网站，也不会自动生成 Android 安装包或 Release。
+
+网站服务保存在独立的 `question-bank/server/` 目录；仓库根的 Next.js 项目继续承担 HTTPS 网关，运行参数见 [GATEWAY.md](GATEWAY.md)。源码不包含运行数据库、用户上传原件、真实环境凭据或安装包。
+
+## 原 Coze 模板说明
 
 这是一个基于 [Next.js 16](https://nextjs.org) + [shadcn/ui](https://ui.shadcn.com) 的全栈应用项目，由扣子编程 CLI 创建。
 

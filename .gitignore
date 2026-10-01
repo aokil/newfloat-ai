@@ -163,3 +163,20 @@ Desktop.ini
 # Misc
 .coze-logs
 .codegraph/
+
+# Website service runtime data and deployment products
+/question-bank/server/data/
+/question-bank/server/.env.*
+!/question-bank/server/.env.example
+/question-bank/artifacts/
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.pem
+*.key
+*.p12
+*.pfx
+*.apk

@@ -1,0 +1,36 @@
+{
+  "name": "newfloat-question-bank-server",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "admin": "node src/admin.js",
+    "backup": "node src/backup.js",
+    "app-update": "node src/app-update-admin.js"
+  },
+  "dependencies": {
+    "@alicloud/dysmsapi20170525": "4.6.0",
+    "@alicloud/openapi-client": "0.4.15",
+    "@alicloud/tea-util": "1.4.11",
+    "@fastify/multipart": "10.1.2",
+    "@fastify/rate-limit": "11.2.0",
+    "@fastify/static": "10.1.5",
+    "@supabase/supabase-js": "2.117.2",
+    "csv-parse": "7.0.3",
+    "exceljs": "4.4.0",
+    "fastify": "5.12.5",
+    "mammoth": "1.12.3",
+    "pdfjs-dist": "6.3.289",
+    "yauzl": "3.4.0"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
+  }
+}

@@ -6,7 +6,14 @@ import { isIP } from 'node:net';
 const UPLOAD_LIMIT = 12 * 1024 * 1024;
 const DOWNLOAD_LIMIT = 32 * 1024 * 1024;
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
-const STATIC_PATHS = new Set(['/', '/app.js', '/style.css', '/brandmark.svg', '/health']);
+const STATIC_PATHS = new Set([
+  '/', '/app.js', '/style.css', '/brandmark.svg', '/health',
+  '/workspace.js', '/workspace.css', '/ui-assets.js',
+  '/assets/avatars/pinterest-01.jpg', '/assets/avatars/pinterest-02.jpg',
+  '/assets/avatars/pinterest-03.jpg', '/assets/avatars/pinterest-04.jpg',
+  '/assets/avatars/pinterest-05.jpg', '/assets/avatars/pinterest-06.jpg',
+  '/assets/avatars/sources.json', '/assets/model-icons-license.txt',
+]);
 const REQUEST_HEADERS = ['accept', 'accept-language', 'content-type', 'content-length',
   'if-none-match', 'if-modified-since', 'range', 'if-range', 'idempotency-key'];
 const RESPONSE_HEADERS = ['content-type', 'content-length', 'content-disposition',

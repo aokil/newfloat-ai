@@ -16,7 +16,8 @@ TLS 保留完整的 CA、有效期和 IP SAN 校验。不能关闭证书校验�
 
 ## 路由与限制
 
-- Node Route Handler 代理 `/`、`/app.js`、`/style.css`、`/brandmark.svg`、`/health`、`/v1/**`；根页原模板已经删除，避免与可选 catch-all 路由冲突。
+- Node Route Handler 代理 `/`、`/app.js`、`/style.css`、`/brandmark.svg`、`/health`、`/workspace.js`、`/workspace.css`、`/ui-assets.js`、`/v1/**`；根页原模板已经删除，避免与可选 catch-all 路由冲突。
+- 新版网站头像资源仅开放 `/assets/avatars/pinterest-01.jpg` 至 `/assets/avatars/pinterest-06.jpg` 六个精确路径，以及来源记录 `/assets/avatars/sources.json` 和模型图标许可 `/assets/model-icons-license.txt`。不开放 `/assets/**` 通配路径；网页与静态资源仍由题库服务提供。
 - 仅固定上游。非题库路径、编码分隔符及外部重定向拒绝；上游同源重定向改为相对路径，不跟随重定向。
 - 保留状态、Content-Type、CSP、静态资源 Cache-Control 和下载必要头。`/v1` 及带 Authorization 的请求强制 `no-store`。不转发 cookies。
 - 只转发 Bearer、`Idempotency-Key` 与必要内容头。客户端提供的网关密钥、IP 头、Host 等一律丢弃；服务端注入 `X-Tiyu-Gateway-Key`。
