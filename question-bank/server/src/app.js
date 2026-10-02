@@ -13,6 +13,7 @@ import { accountInfo, points, requirePositivePoints } from './account.js';
 import { adminRoutes } from './admin-routes.js';
 import { registerAppUpdateRoutes } from './app-updates.js';
 import { aiRoutes } from './ai-routes.js';
+import { registerPaymentRoutes } from './payment-routes.js';
 const UPLOAD_LIMIT = 10 * 1024 * 1024;
 const missing = () => { throw new ApiError(404, 'NOT_FOUND', '未找到可访问的记录'); };
 const conflict = message => { throw new ApiError(409, 'VERSION_CONFLICT', message); };
@@ -33,6 +34,8 @@ function importInfo(row) {
     const errors = items.flatMap(q => q.errors.map(message => ({ questionId: q.questionId, message })));
     return { importId: row.id, status: row.status, revision: row.revision, filename: row.filename, format: row.format, title: row.title,
         ...importSummary(items), warnings: JSON.parse(row.warnings), errors,
+        ...(row.status === 'confirmed' && Number.isSafeInteger(JSON.parse(row.summary || '{}').confirmedQuestionCount)
+            ? { confirmedQuestionCount: JSON.parse(row.summary).confirmedQuestionCount } : {}),
         ...(row.committed_bank_id ? { bankId: row.committed_bank_id, dataVersion: row.committed_version } : {}) };
 }
 function privateEntry(bank, version) {
@@ -54,7 +57,7 @@ function indexedQuestions(payload) {
     });
     return { questions, typeCounts: { ...counts } };
 }
-export async function buildApp({ database = ':memory:', store: providedStore = null, logger = false, rateLimits = true, smsTransport = null, smsHmacKey = null, smsLimits = true, phoneVerifier = null, testHooks = {}, modelMasterKey = null, modelTransport, aiTransport, cozeBridge = null, appUpdateDirectory = null, trustProxy = ['127.0.0.1', '::1'], bootstrapAdminPhone = null } = {}) {
+export async function buildApp({ database = ':memory:', store: providedStore = null, logger = false, rateLimits = true, smsTransport = null, smsHmacKey = null, smsLimits = true, phoneVerifier = null, testHooks = {}, modelMasterKey = null, modelTransport, aiTransport, cozeBridge = null, paymentTransport = null, appUpdateDirectory = null, trustProxy = ['127.0.0.1', '::1'], bootstrapAdminPhone = null } = {}) {
     const store = providedStore || await AsyncSqliteStore.open(database);
     if (bootstrapAdminPhone !== null) bootstrapAdminPhone = phoneNumber(bootstrapAdminPhone);
     // Runtime readiness is shared with catalog/account checks; no credentials or
@@ -433,7 +436,11 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         });
     });
     app.post('/v1/imports/:id/confirm', { preHandler: auth }, async (req) => {
-        fields(req.body, ['expectedRevision', 'title', 'bankId', 'expectedBankVersion']);
+        fields(req.body, ['expectedRevision', 'title', 'bankId', 'expectedBankVersion', 'selectedQuestionIds']);
+        const selectedIds = req.body.selectedQuestionIds;
+        if (selectedIds !== undefined && (!Array.isArray(selectedIds) || !selectedIds.length || selectedIds.length > 20000 ||
+            selectedIds.some(value => typeof value !== 'string' || !value.trim() || value.length > 256) || new Set(selectedIds).size !== selectedIds.length))
+            throw new ApiError(400, 'INVALID_REQUEST', '请选择题目，题目ID不能重复或无效');
         const row = await ownImport(req);
         const digest = sha256(JSON.stringify({ importId: row.id, ...req.body }));
         return await idem(req, digest, async () => {
@@ -445,17 +452,31 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
                 if (!b)
                     missing();
                 const v = await store.get('SELECT * FROM private_versions WHERE bank_id=? AND data_version=?', b.id, row.committed_version);
+                if (!v) missing();
+                // A new idempotency key cannot silently change an already committed selection.
+                if (selectedIds !== undefined) {
+                    const committedIds = new Set(JSON.parse(v.payload).questions.map(q => q.questionId));
+                    if (committedIds.size !== selectedIds.length || selectedIds.some(value => !committedIds.has(value)))
+                        conflict('这份预览已入库，不能改用另一组题目确认');
+                }
                 return { bankId: b.id, dataVersion: v.data_version, visibility: 'private', questionCount: v.question_count };
             }
             await requirePositivePoints(store, req.auth.user_id);
             if (['failed', 'processing'].includes(row.status))
                 throw new ApiError(422, 'VALIDATION_FAILED', '解析尚未成功完成，不能确认');
             const preview = JSON.parse(row.preview);
-            if (preview.some(q => q.errors.length))
+            const selection = selectedIds === undefined ? null : new Set(selectedIds);
+            const previewIds = new Set(preview.map(q => q.questionId));
+            if (selection && selectedIds.some(value => !previewIds.has(value)))
+                throw new ApiError(400, 'INVALID_REQUEST', '选中的题目不在当前预览中');
+            const selectedPreview = selection ? preview.filter(q => selection.has(q.questionId)) : preview;
+            if (selectedPreview.some(q => q.errors.length))
                 throw new ApiError(422, 'VALIDATION_FAILED', '仍有解析或结构错误，请修正预览');
-            const questions = preview.map(q => inspectQuestion(q, q.questionId));
+            const questions = selectedPreview.map(q => inspectQuestion(q, q.questionId));
             if (!questions.length || questions.some(q => q.errors.length))
                 throw new ApiError(422, 'VALIDATION_FAILED', '没有可确认题目或仍有结构错误');
+            if (selection && questions.some(q => !q.complete))
+                throw new ApiError(422, 'VALIDATION_FAILED', '选中的题目仍有答案需复审，请先保存正确答案');
             if (req.body.expectedBankVersion !== undefined && !req.body.bankId)
                 throw new ApiError(400, 'INVALID_REQUEST', 'expectedBankVersion必须与bankId配对');
             if (req.body.bankId && !req.body.expectedBankVersion)
@@ -479,7 +500,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
             else
                 await store.run('INSERT INTO banks(id,owner_id,title,current_version,sequence,created_at,updated_at) VALUES(?,?,?,?,?,?,?)', bankId, req.auth.user_id, title, dataVersion, sequence, now, now);
             await store.run('INSERT INTO private_versions(bank_id,data_version,sequence,payload,sha256,size_bytes,question_count,created_at) VALUES(?,?,?,?,?,?,?,?)', bankId, dataVersion, sequence, payload, sha256(payload), Buffer.byteLength(payload), questions.length, now);
-            await store.run("UPDATE imports SET status='confirmed',committed_bank_id=?,committed_version=?,title=? WHERE id=?", bankId, dataVersion, title, row.id);
+            await store.run("UPDATE imports SET status='confirmed',committed_bank_id=?,committed_version=?,title=?,summary=? WHERE id=?", bankId, dataVersion, title, JSON.stringify({ ...importSummary(preview), confirmedQuestionCount: questions.length }), row.id);
             await store.audit(req.auth.user_id, 'confirm-import', bankId, { dataVersion, importId: row.id });
             return { bankId, dataVersion, visibility: 'private', questionCount: questions.length };
         });
@@ -734,6 +755,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
     });
     adminRoutes(app, { store, auth, admin, idem, integer, modelMasterKey, modelTransport, cozeBridge });
     await aiRoutes(app, { store, auth, modelMasterKey, aiTransport, cozeBridge, rateLimits });
+    await registerPaymentRoutes(app, { store, auth, payment: paymentTransport });
     registerAppUpdateRoutes(app, { directory: appUpdateDirectory });
     await app.register(staticFiles, { root: fileURLToPath(new URL('../public/', import.meta.url)), prefix: '/', index: ['index.html'], dotfiles: 'deny' });
     return app;

@@ -47,7 +47,7 @@ export function nativeBackendFailure(): BackendFailure | null {
   return state.failure ? { ...state.failure } : null;
 }
 type NativeFactory = (options: { databaseUrl: string; phoneConfiguration?: SupabaseEnvironment;
-  cozeBridge: ReturnType<typeof nativeModelBridge> }) => Promise<FastifyInstance>;
+  cozeBridge: ReturnType<typeof nativeModelBridge>; env: Readonly<NodeJS.ProcessEnv> }) => Promise<FastifyInstance>;
 
 /** Freeze the instance's project, phase, credential and resource binding in memory. */
 function runtimeBindingHash(): string {
@@ -56,7 +56,9 @@ function runtimeBindingHash(): string {
     'COZE_WORKLOAD_IDENTITY_CLIENT_SECRET', 'COZE_WORKLOAD_IDENTITY_TOKEN_ENDPOINT',
     'COZE_WORKLOAD_ACCESS_TOKEN_ENDPOINT', 'COZE_OUTBOUND_AUTH_ENDPOINT', 'COZE_SERVER_ENV', 'TIYU_GATEWAY_KEY',
     'BOOTSTRAP_ADMIN_PHONE', 'PGDATABASE_URL_DEV', 'PGDATABASE_URL_PROD', 'TIYU_SUPABASE_URL_DEV',
-    'TIYU_SUPABASE_URL_PROD', 'TIYU_SUPABASE_ANON_KEY_DEV', 'TIYU_SUPABASE_ANON_KEY_PROD'];
+    'TIYU_SUPABASE_URL_PROD', 'TIYU_SUPABASE_ANON_KEY_DEV', 'TIYU_SUPABASE_ANON_KEY_PROD',
+    'ALIPAY_ENABLED', 'ALIPAY_ENVIRONMENT', 'ALIPAY_APP_ID', 'ALIPAY_SELLER_ID', 'ALIPAY_NOTIFY_URL',
+    'ALIPAY_APP_PRIVATE_KEY', 'ALIPAY_PUBLIC_KEY', 'NODE_DEBUG'];
   return createHash('sha256').update(JSON.stringify(names.map(name => [name, process.env[name] ?? null]))).digest('hex');
 }
 
@@ -84,6 +86,7 @@ export function getNativeBackend(): Promise<FastifyInstance> {
     // The SDK's first Config construction can load the platform .env. Freeze
     // the validated configuration before the first asynchronous operation.
     const authorizedBinding = runtimeBindingHash();
+    const authorizedEnvironment = Object.freeze({ ...process.env });
     if (state.runtimeBindingHash && state.runtimeBindingHash !== authorizedBinding)
       throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     state.runtimeBindingHash ??= authorizedBinding;
@@ -127,7 +130,7 @@ export function getNativeBackend(): Promise<FastifyInstance> {
     if (runtimeBindingHash() !== authorizedBinding) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     stage = 'business-initialization';
     const app = await createCozeApp({ databaseUrl: database.databaseUrl,
-      phoneConfiguration: phone, cozeBridge: bridge });
+      phoneConfiguration: phone, cozeBridge: bridge, env: authorizedEnvironment });
     if (runtimeBindingHash() !== authorizedBinding) {
       await app.close().catch(() => undefined);
       throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');

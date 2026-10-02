@@ -2,17 +2,17 @@ import {AsyncLocalStorage} from 'node:async_hooks';
 import pg from 'pg';
 
 const {Pool, types} = pg;
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 // All instances share these transaction locks, including single-statement writes.
 const LOCK_NAMESPACE = 1179406145;
 const WRITE_LOCK = 1413564759;
 const MIGRATION_LOCK = 1413564749;
 const APPLICATION_TABLES = ['users','sessions','used_refresh','imports','banks','private_versions','confirmations',
   'reviews','releases','audit','points_ledger','sms_challenges','sms_failures','models','model_tests',
-  'announcements','announcement_dismissals','external_phone_identities','ai_requests'];
+  'announcements','announcement_dismissals','external_phone_identities','ai_requests','payment_orders'];
 
 // Coze can copy DDL without rows. An empty copied schema is accepted only when
-// this complete version-8 structural contract matches; a partial/unknown schema
+// this complete version-8/9 structural contract matches; a partial/unknown schema
 // must never be blessed with a version marker merely because it has no data.
 const SCHEMA_8_COLUMNS = {
   users:'id:text username:text display_name:text password_hash:text role:text disabled:integer created_at:bigint phone_number:text? phone_verified:integer last_login_at:bigint? membership:text membership_expires:bigint? trial_started:bigint trial_ends:bigint points_balance:bigint points_reserved:bigint revision:integer avatar_id:text?',
@@ -69,6 +69,8 @@ const SCHEMA_8_INDEXES = {
   sms_target_purpose:['sms_challenges','target_user_id,purpose,created_at'],ai_requests_pending:['ai_requests','status,expires_at'],
   ai_requests_user_time:['ai_requests','user_id,created_at'],ai_requests_model_time:['ai_requests','model_id,created_at']
 };
+const PAYMENT_COLUMNS='id:text owner_id:text idempotency_hash:text request_hash:text environment:text app_id:text seller_id:text package_id:text package_title:text amount_minor:bigint points:bigint status:text qr_code:text? trade_no:text? receipt_hash:text? error_code:text? created_at:bigint updated_at:bigint expires_at:bigint precreate_at:bigint checked_at:bigint? paid_at:bigint?';
+const PAYMENT_CHECKS=["environment IN ('sandbox','production')",'amount_minor>0','points>0',"status IN ('creating','pending','uncertain','failed','paid','closed')"];
 
 function safeInteger(value) {
   if (!/^[+-]?\d+(?:\.0+)?$/u.test(String(value))) throw new RangeError('Database numeric value is not an integer');
@@ -239,14 +241,21 @@ function normalizedDefinition(sql) {
 }
 
 async function assertEmptyCopiedSchema(client, schema) {
-  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete, empty version-8 application schema');};
-  const tableNames = [...APPLICATION_TABLES,'schema_metadata'];
+  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete, empty version-8 or version-9 application schema');};
   const existing = await client.query('SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname=$1',[schema]);
   const names = new Set(existing.rows.map(row => row.tablename));
+  const payment=names.has('payment_orders'),copiedVersion=payment?9:8;
+  const tableNames = [...APPLICATION_TABLES.filter(name=>name!=='payment_orders'||payment),'schema_metadata'];
+  const columnContract={...SCHEMA_8_COLUMNS,...(payment?{payment_orders:PAYMENT_COLUMNS}:{})};
+  const primaryContract={...SCHEMA_8_PRIMARY,...(payment?{payment_orders:'id'}:{})};
+  const uniqueContract={...SCHEMA_8_UNIQUE,...(payment?{payment_orders:['owner_id,idempotency_hash','environment,trade_no']}:{})};
+  const foreignContract={...SCHEMA_8_FOREIGN,...(payment?{payment_orders:{owner_id:'users.id'}}:{})};
+  const checkContract={...SCHEMA_8_CHECKS,...(payment?{payment_orders:PAYMENT_CHECKS}:{})};
+  const indexContract={...SCHEMA_8_INDEXES,...(payment?{payment_orders_owner:['payment_orders','owner_id,created_at'],payment_orders_pending:['payment_orders','status,expires_at']}:{})};
   if (tableNames.some(name => !names.has(name))) fail();
   const columns = await client.query(`SELECT table_name,column_name,data_type,is_nullable,column_default,is_identity,identity_generation
     FROM information_schema.columns WHERE table_schema=$1 AND table_name=ANY($2::text[])`,[schema,tableNames]);
-  for (const [table,specification] of Object.entries(SCHEMA_8_COLUMNS)) {
+  for (const [table,specification] of Object.entries(columnContract)) {
     const actual = columns.rows.filter(row => row.table_name === table);
     const expected = specification.split(' ').map(column => {const [name,type] = column.split(':'); return {name,type:type.replace(/\?$/u,''),nullable:type.endsWith('?')};});
     if (actual.length !== expected.length) fail();
@@ -270,10 +279,10 @@ async function assertEmptyCopiedSchema(client, schema) {
     LEFT JOIN pg_catalog.pg_class rt ON rt.oid=c.confrelid LEFT JOIN pg_catalog.pg_namespace rn ON rn.oid=rt.relnamespace
     WHERE n.nspname=$1 AND t.relname=ANY($2::text[]) AND c.contype<>'n'`,[schema,tableNames]);
   const expected = new Set(), actual = new Set();
-  for (const [table,primary] of Object.entries(SCHEMA_8_PRIMARY)) expected.add(`p|${table}|${primary}`);
-  for (const [table,unique] of Object.entries(SCHEMA_8_UNIQUE)) for (const columns of unique) expected.add(`u|${table}|${columns}`);
-  for (const [table,foreign] of Object.entries(SCHEMA_8_FOREIGN)) for (const [column,target] of Object.entries(foreign)) expected.add(`f|${table}|${column}|${target}`);
-  for (const [table,checks] of Object.entries(SCHEMA_8_CHECKS)) for (const check of checks) expected.add(`c|${table}|${normalizedDefinition(check)}`);
+  for (const [table,primary] of Object.entries(primaryContract)) expected.add(`p|${table}|${primary}`);
+  for (const [table,unique] of Object.entries(uniqueContract)) for (const columns of unique) expected.add(`u|${table}|${columns}`);
+  for (const [table,foreign] of Object.entries(foreignContract)) for (const [column,target] of Object.entries(foreign)) expected.add(`f|${table}|${column}|${target}`);
+  for (const [table,checks] of Object.entries(checkContract)) for (const check of checks) expected.add(`c|${table}|${normalizedDefinition(check)}`);
   for (const row of constraints.rows) {
     if (row.condeferrable || row.condeferred || !row.convalidated) fail();
     if (row.contype === 'p' || row.contype === 'u') actual.add(`${row.contype}|${row.table_name}|${row.columns.join(',')}`);
@@ -291,7 +300,7 @@ async function assertEmptyCopiedSchema(client, schema) {
     pg_catalog.pg_get_expr(x.indpred,x.indrelid,true) AS predicate,pg_catalog.pg_get_expr(x.indexprs,x.indrelid,true) AS expressions
     FROM pg_catalog.pg_index x JOIN pg_catalog.pg_class t ON t.oid=x.indrelid JOIN pg_catalog.pg_class i ON i.oid=x.indexrelid
     JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND t.relname=ANY($2::text[])`,[schema,tableNames]);
-  for (const [name,[table,columns,unique=false,predicate=null]] of Object.entries(SCHEMA_8_INDEXES)) {
+  for (const [name,[table,columns,unique=false,predicate=null]] of Object.entries(indexContract)) {
     const index = indexes.rows.find(row => row.index_name === name);
     if (!index || index.table_name !== table || index.columns.join(',') !== columns || index.indisunique !== unique || index.expressions || !index.indisvalid || !index.indisready || normalizedDefinition(index.predicate) !== normalizedDefinition(predicate)) fail();
   }
@@ -299,10 +308,11 @@ async function assertEmptyCopiedSchema(client, schema) {
     const columns = index.columns.join(',');
     if (index.expressions || !index.indisvalid || !index.indisready) fail();
     if (index.table_name === 'users' && columns === 'phone_number' && normalizedDefinition(index.predicate) === normalizedDefinition('phone_number IS NOT NULL')) continue;
-    if (index.predicate || !(SCHEMA_8_PRIMARY[index.table_name] === columns || SCHEMA_8_UNIQUE[index.table_name]?.includes(columns))) fail();
+    if (index.predicate || !(primaryContract[index.table_name] === columns || uniqueContract[index.table_name]?.includes(columns))) fail();
   }
   const populated = await client.query(tableNames.map(name => `SELECT '${name}' AS table_name WHERE EXISTS(SELECT 1 FROM "${name}")`).join(' UNION ALL '));
   if (populated.rows.length) fail();
+  return copiedVersion;
 }
 
 const BASE_SCHEMA = `
@@ -385,7 +395,17 @@ CREATE TABLE ai_requests(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES us
   created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,expires_at BIGINT NOT NULL,UNIQUE(user_id,idempotency_hash));
 CREATE INDEX ai_requests_pending ON ai_requests(status,expires_at);
 CREATE INDEX ai_requests_user_time ON ai_requests(user_id,created_at);
-CREATE INDEX ai_requests_model_time ON ai_requests(model_id,created_at);`
+CREATE INDEX ai_requests_model_time ON ai_requests(model_id,created_at);`,
+  9: `CREATE TABLE payment_orders(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL REFERENCES users(id),
+idempotency_hash TEXT NOT NULL,request_hash TEXT NOT NULL,environment TEXT NOT NULL CHECK(environment IN ('sandbox','production')),
+app_id TEXT NOT NULL,seller_id TEXT NOT NULL,package_id TEXT NOT NULL,package_title TEXT NOT NULL,
+amount_minor BIGINT NOT NULL CHECK(amount_minor>0),points BIGINT NOT NULL CHECK(points>0),
+status TEXT NOT NULL CHECK(status IN ('creating','pending','uncertain','failed','paid','closed')),
+qr_code TEXT,trade_no TEXT,receipt_hash TEXT,error_code TEXT,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,
+ expires_at BIGINT NOT NULL,precreate_at BIGINT NOT NULL,checked_at BIGINT,paid_at BIGINT,
+UNIQUE(owner_id,idempotency_hash),UNIQUE(environment,trade_no));
+CREATE INDEX payment_orders_owner ON payment_orders(owner_id,created_at);
+CREATE INDEX payment_orders_pending ON payment_orders(status,expires_at);`
 };
 
 export class PostgresStore {
@@ -432,9 +452,9 @@ export class PostgresStore {
       }
       let marker = (await client.query('SELECT version FROM schema_metadata WHERE singleton=1 FOR UPDATE')).rows[0];
       if (!marker) {
-        await assertEmptyCopiedSchema(client,this.schema);
-        await client.query('INSERT INTO schema_metadata(singleton,version,updated_at) VALUES(1,$1,$2)',[SCHEMA_VERSION,Date.now()]);
-        marker = {version:SCHEMA_VERSION};
+        const copiedVersion=await assertEmptyCopiedSchema(client,this.schema);
+        await client.query('INSERT INTO schema_metadata(singleton,version,updated_at) VALUES(1,$1,$2)',[copiedVersion,Date.now()]);
+        marker = {version:copiedVersion};
       }
       if (!marker || !Number.isSafeInteger(marker.version) || marker.version < 0) throw new Error('PostgreSQL schema marker is invalid');
       if (marker.version > SCHEMA_VERSION) throw new Error('Database schema is newer than this server');

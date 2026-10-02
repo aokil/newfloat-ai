@@ -8,7 +8,7 @@ export class Store {
     this.db = new DatabaseSync(filename);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
     const version = this.db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 8) {this.db.close();throw new Error('Database schema is newer than this server');}
+    if (version > 9) {this.db.close();throw new Error('Database schema is newer than this server');}
     if (version === 0) this.transaction(() => this.db.exec(`
       CREATE TABLE users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL,
         role TEXT NOT NULL CHECK(role IN ('user','admin')), disabled INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
@@ -118,6 +118,19 @@ export class Store {
       CREATE INDEX ai_requests_user_time ON ai_requests(user_id,created_at);
       CREATE INDEX ai_requests_model_time ON ai_requests(model_id,created_at);
       PRAGMA user_version=8;
+    `));
+    if(version<9)this.transaction(()=>this.db.exec(`
+      CREATE TABLE payment_orders(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL REFERENCES users(id),
+        idempotency_hash TEXT NOT NULL,request_hash TEXT NOT NULL,environment TEXT NOT NULL CHECK(environment IN ('sandbox','production')),
+        app_id TEXT NOT NULL,seller_id TEXT NOT NULL,package_id TEXT NOT NULL,package_title TEXT NOT NULL,
+        amount_minor INTEGER NOT NULL CHECK(amount_minor>0),points INTEGER NOT NULL CHECK(points>0),
+        status TEXT NOT NULL CHECK(status IN ('creating','pending','uncertain','failed','paid','closed')),
+        qr_code TEXT,trade_no TEXT,receipt_hash TEXT,error_code TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,precreate_at INTEGER NOT NULL,checked_at INTEGER,paid_at INTEGER,
+        UNIQUE(owner_id,idempotency_hash),UNIQUE(environment,trade_no));
+      CREATE INDEX payment_orders_owner ON payment_orders(owner_id,created_at);
+      CREATE INDEX payment_orders_pending ON payment_orders(status,expires_at);
+      PRAGMA user_version=9;
     `));
   }
   get(sql, ...params) { return this.db.prepare(sql).get(...params); }
