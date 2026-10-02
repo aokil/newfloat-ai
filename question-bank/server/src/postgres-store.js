@@ -11,9 +11,9 @@ const APPLICATION_TABLES = ['users','sessions','used_refresh','imports','banks',
   'reviews','releases','audit','points_ledger','sms_challenges','sms_failures','models','model_tests',
   'announcements','announcement_dismissals','external_phone_identities','ai_requests','payment_orders'];
 
-// Coze can copy DDL without rows. An empty copied schema is accepted only when
-// this complete version-8/9 structural contract matches; a partial/unknown schema
-// must never be blessed with a version marker merely because it has no data.
+// Coze can copy newer DDL while preserving an older production version marker.
+// Accept copied structures only after checking the complete version-8/9 contract;
+// the no-marker recovery additionally requires every business table to be empty.
 const SCHEMA_8_COLUMNS = {
   users:'id:text username:text display_name:text password_hash:text role:text disabled:integer created_at:bigint phone_number:text? phone_verified:integer last_login_at:bigint? membership:text membership_expires:bigint? trial_started:bigint trial_ends:bigint points_balance:bigint points_reserved:bigint revision:integer avatar_id:text?',
   sessions:'id:text user_id:text family_id:text client_id:text access_hash:text refresh_hash:text access_expires:bigint refresh_expires:bigint revoked:integer created_at:bigint',
@@ -240,8 +240,9 @@ function normalizedDefinition(sql) {
   return result.join('');
 }
 
-async function assertEmptyCopiedSchema(client, schema) {
-  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete, empty version-8 or version-9 application schema');};
+/** Read-only structural preflight; never writes markers, DDL or business rows. */
+export async function assertCopiedApplicationStructure(client, schema) {
+  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete version-8 or version-9 application schema');};
   const existing = await client.query('SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname=$1',[schema]);
   const names = new Set(existing.rows.map(row => row.tablename));
   const payment=names.has('payment_orders'),copiedVersion=payment?9:8;
@@ -292,14 +293,16 @@ async function assertEmptyCopiedSchema(client, schema) {
     } else if (row.contype === 'c') actual.add(`c|${row.table_name}|${normalizedDefinition(row.definition)}`);
     else fail();
   }
-  if (expected.size !== actual.size || [...expected].some(value => !actual.has(value))) fail();
+  if (expected.size !== actual.size || actual.size !== constraints.rows.length || [...expected].some(value => !actual.has(value))) fail();
   const indexes = await client.query(`SELECT t.relname AS table_name,i.relname AS index_name,x.indisunique,x.indisprimary,x.indisvalid,x.indisready,
+    x.indnkeyatts,x.indnatts,am.amname AS access_method,x.indoption::smallint[] AS sort_options,
     ARRAY(SELECT a.attname::text FROM unnest(x.indkey::smallint[]) WITH ORDINALITY AS k(attnum,pos)
       JOIN pg_catalog.pg_attribute a ON a.attrelid=x.indrelid AND a.attnum=k.attnum
       WHERE k.pos<=x.indnkeyatts ORDER BY k.pos) AS columns,
     pg_catalog.pg_get_expr(x.indpred,x.indrelid,true) AS predicate,pg_catalog.pg_get_expr(x.indexprs,x.indrelid,true) AS expressions
     FROM pg_catalog.pg_index x JOIN pg_catalog.pg_class t ON t.oid=x.indrelid JOIN pg_catalog.pg_class i ON i.oid=x.indexrelid
-    JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=$1 AND t.relname=ANY($2::text[])`,[schema,tableNames]);
+    JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace JOIN pg_catalog.pg_am am ON am.oid=i.relam
+    WHERE n.nspname=$1 AND t.relname=ANY($2::text[])`,[schema,tableNames]);
   for (const [name,[table,columns,unique=false,predicate=null]] of Object.entries(indexContract)) {
     const index = indexes.rows.find(row => row.index_name === name);
     if (!index || index.table_name !== table || index.columns.join(',') !== columns || index.indisunique !== unique || index.expressions || !index.indisvalid || !index.indisready || normalizedDefinition(index.predicate) !== normalizedDefinition(predicate)) fail();
@@ -310,8 +313,32 @@ async function assertEmptyCopiedSchema(client, schema) {
     if (index.table_name === 'users' && columns === 'phone_number' && normalizedDefinition(index.predicate) === normalizedDefinition('phone_number IS NOT NULL')) continue;
     if (index.predicate || !(primaryContract[index.table_name] === columns || uniqueContract[index.table_name]?.includes(columns))) fail();
   }
+  if (payment) {
+    const paymentIndexes = indexes.rows.filter(row => row.table_name === 'payment_orders');
+    // The copied table must contain exactly its three constraint indexes and
+    // two ordinary indexes. Reject unknown keys, INCLUDE columns or sort rules.
+    if (paymentIndexes.length !== 5) fail();
+    const paymentUnique = new Set();
+    for (const index of paymentIndexes) {
+      if (index.access_method !== 'btree' || index.indnatts !== index.indnkeyatts ||
+        index.sort_options.length !== index.indnkeyatts || index.sort_options.some(option => option !== 0) ||
+        index.expressions || index.predicate || !index.indisvalid || !index.indisready) fail();
+      if (index.indisunique) {
+        const columns = index.columns.join(',');
+        if (index.indisprimary !== (columns === 'id') || paymentUnique.has(columns)) fail();
+        paymentUnique.add(columns);
+      } else if (!['payment_orders_owner','payment_orders_pending'].includes(index.index_name) || index.indisprimary) fail();
+    }
+    if (paymentUnique.size !== 3 || !paymentUnique.has('id') ||
+      !paymentUnique.has('owner_id,idempotency_hash') || !paymentUnique.has('environment,trade_no')) fail();
+  }
+  return {tableNames,copiedVersion};
+}
+
+async function assertEmptyCopiedSchema(client, schema) {
+  const {tableNames,copiedVersion} = await assertCopiedApplicationStructure(client,schema);
   const populated = await client.query(tableNames.map(name => `SELECT '${name}' AS table_name WHERE EXISTS(SELECT 1 FROM "${name}")`).join(' UNION ALL '));
-  if (populated.rows.length) fail();
+  if (populated.rows.length) throw new Error('Copied PostgreSQL schema is not an empty version-8 or version-9 application schema');
   return copiedVersion;
 }
 
@@ -461,7 +488,17 @@ export class PostgresStore {
       let version = marker.version;
       if (version === 0) {await client.query(BASE_SCHEMA); version = 1;}
       for (let next = version+1; next <= SCHEMA_VERSION; next++) {
-        await client.query(MIGRATIONS[next]);
+        if (version === 8 && next === 9 && names.has('payment_orders')) {
+          // Publishing can copy DEV's payment DDL into PROD without advancing
+          // the existing marker. Preserve existing users/ledger/models, but do
+          // not adopt an unknown or partially copied payment table.
+          const structure = await assertCopiedApplicationStructure(client,this.schema);
+          if (structure.copiedVersion !== 9 || names.size !== structure.tableNames.length ||
+            structure.tableNames.some(name => !names.has(name)))
+            throw new Error('Precopied payment schema is not the complete version-9 application schema');
+          const paymentRows = await client.query('SELECT 1 AS present FROM payment_orders LIMIT 1');
+          if (paymentRows.rows.length) throw new Error('Precopied payment table must be empty before version-8 migration');
+        } else await client.query(MIGRATIONS[next]);
         if (next === 3) {
           const imports = await client.query('SELECT id,preview FROM imports');
           for (const row of imports.rows) {
