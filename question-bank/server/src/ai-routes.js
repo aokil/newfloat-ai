@@ -2,6 +2,7 @@ import {ApiError,authenticate,fields,id,sha256,text} from './security.js';
 import {points,requirePositivePoints} from './account.js';
 import {BYOK_PROVIDERS,byokConfiguration,officialModelSearch,openKey} from './models.js';
 import {MODEL_CATALOG,catalogEntry,configuredCatalog,modelUnavailableReason} from './model-catalog.js';
+import {minimalAnswer} from './answer-only.js';
 
 const ERROR_MESSAGES={
   PROVIDER_AUTH_FAILED:'模型 API Key 无效，请检查配置',MODEL_FORBIDDEN:'当前 Key 没有该模型权限',
@@ -51,10 +52,10 @@ async function previousResult(store,row,digest){
   const user=await store.get('SELECT points_balance,points_reserved FROM users WHERE id=?',row.user_id);
   return {...JSON.parse(row.result),pointsAvailable:user.points_balance-user.points_reserved};
 }
-function validateReceipt(result){
+function validateReceipt(result,question){
   if(!result||typeof result.answer!=='string'||!result.answer.trim()||result.answer.length>16000||typeof result.explanation!=='string'||result.explanation.length>16000)throw new Error('INVALID_ANSWER');
   if(!result.usage||!['prompt_tokens','completion_tokens','total_tokens'].every(key=>Number.isSafeInteger(result.usage[key])&&result.usage[key]>=0))throw new Error('USAGE_MISSING');
-  return {answer:result.answer,explanation:result.explanation,usage:{prompt_tokens:result.usage.prompt_tokens,completion_tokens:result.usage.completion_tokens,total_tokens:result.usage.total_tokens}};
+  return {answer:minimalAnswer(result.answer,question),explanation:'',usage:{prompt_tokens:result.usage.prompt_tokens,completion_tokens:result.usage.completion_tokens,total_tokens:result.usage.total_tokens}};
 }
 
 export async function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=officialModelSearch,cozeBridge=null,rateLimits=true}){
@@ -131,7 +132,7 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=offici
       });
       if(begin.replay)return begin.replay;
       request=begin.request;
-      const receipt=validateReceipt(await (config.execution==='coze'?cozeBridge.search(config,question,{requestId:request.id}):aiTransport(config,secret,question)));
+      const receipt=validateReceipt(await (config.execution==='coze'?cozeBridge.search(config,question,{requestId:request.id}):aiTransport(config,secret,question)),question);
       if(typeof secret==='string'&&secret&&(receipt.answer.includes(secret)||receipt.explanation.includes(secret)))throw new Error('INVALID_PROVIDER_RESPONSE');
       return await store.transaction(async()=>{
         const row=await store.get('SELECT * FROM ai_requests WHERE id=?',request.id);

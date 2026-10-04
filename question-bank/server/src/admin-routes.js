@@ -24,9 +24,9 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,mo
   app.post('/v1/admin/users/:id/status',{preHandler:admin},async req=>await change(req,['disabled','expectedRevision','reason'],'account-status',async(u)=>{
     if(req.body.expectedRevision!==u.revision)conflict();if(typeof req.body.disabled!=='boolean')throw new ApiError(400,'INVALID_REQUEST','disabled须为布尔值');
     if(req.body.disabled&&(u.id===req.auth.user_id||(u.role==='admin'&&!u.disabled&&(await store.get("SELECT COUNT(*) AS n FROM users WHERE role='admin' AND disabled=0")).n<=1)))throw new ApiError(422,'VALIDATION_FAILED','不能禁用自己或最后一个可用管理员');
-    await store.run('UPDATE users SET disabled=?,revision=revision+1 WHERE id=?',req.body.disabled?1:0,u.id);if(req.body.disabled)await store.run('UPDATE sessions SET revoked=1 WHERE user_id=?',u.id);
+    await store.run('UPDATE users SET disabled=?,revision=revision+1 WHERE id=?',req.body.disabled?1:0,u.id);if(req.body.disabled){await store.run('UPDATE sessions SET revoked=1 WHERE user_id=?',u.id);await store.sessionEvents?.changed(u.id);}
   }));
-  app.post('/v1/admin/users/:id/revoke-sessions',{preHandler:admin},async req=>await change(req,['reason'],'revoke-sessions',async u=>{await store.run('UPDATE sessions SET revoked=1 WHERE user_id=?',u.id);return {userId:u.id,status:'revoked'};}));
+  app.post('/v1/admin/users/:id/revoke-sessions',{preHandler:admin},async req=>await change(req,['reason'],'revoke-sessions',async u=>{await store.run('UPDATE sessions SET revoked=1 WHERE user_id=?',u.id);await store.sessionEvents?.changed(u.id);return {userId:u.id,status:'revoked'};}));
   app.post('/v1/admin/users/:id/points-adjustments',{preHandler:admin},async req=>await change(req,['delta','expectedRevision','reason'],'points-adjustment',async(u,reason)=>{
     if(req.body.expectedRevision!==u.revision)conflict();await points(store,u,req.body.delta,req.auth.user_id,reason,`admin:${req.auth.user_id}:${req.url}:${req.headers['idempotency-key']}`);
   }));

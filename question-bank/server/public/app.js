@@ -237,14 +237,71 @@ function actions(...buttons){if(buttons.length<=2)return el('div',{class:'row ac
 function heading(title,description){main.replaceChildren(el('div',{class:'page-heading'},el('div',{},el('h1',{},title),description?el('p',{class:'muted'},description):null)));}
 function dialog(title,fields,submitLabel,onSubmit){const operationKey=crypto.randomUUID();const error=el('p',{class:'error-text',role:'alert'}),form=el('form',{},el('h2',{},title),fields,error);const box=el('dialog',{},el('div',{class:'dialogbody'},form));const submit=el('button',{type:'submit',class:'primary'},submitLabel);form.append(el('div',{class:'dialogactions'},button('取消',()=>box.close()),submit));form.addEventListener('submit',async event=>{event.preventDefault();submit.disabled=true;submit.classList.add('is-busy');error.textContent='';try{await onSubmit(operationKey);box.close();}catch(e){showFormError(error,e.message);}finally{submit.disabled=false;submit.classList.remove('is-busy');}});box.addEventListener('close',()=>box.remove());document.body.append(box);box.showModal();return box;}
 function readDialog(title,content){const box=el('dialog',{},el('div',{class:'dialogbody'},el('h2',{},title),content,el('div',{class:'dialogactions'},button('关闭',()=>box.close()))));box.addEventListener('close',()=>box.remove());document.body.append(box);box.showModal();}
-function clearSession(){web.reset();epoch++;$('subnav').replaceChildren();shell.classList.add('signed-out');session=null;refreshFlight=null;document.querySelectorAll('dialog').forEach(d=>d.close());if(nav){nav.remove();nav=null;}$('account').replaceChildren();loginPage(false,'',false);}
+let sessionFeed=null;
+function stopSessionFeed(){if(!sessionFeed)return;clearTimeout(sessionFeed.retry);clearTimeout(sessionFeed.idle);sessionFeed.controller?.abort();sessionFeed=null;}
+function startSessionFeed(){
+  stopSessionFeed();if(!session)return;
+  const state={epoch,sessionId:session.session.sessionId,failures:0,controller:null,retry:null,idle:null};sessionFeed=state;
+  const current=()=>sessionFeed===state&&session&&epoch===state.epoch&&session.session.sessionId===state.sessionId;
+  async function connect(){
+    if(!current())return;
+    const attempted=session.accessToken,controller=new AbortController();state.controller=controller;
+    let retryDelay=null;
+    const received=()=>{clearTimeout(state.idle);state.idle=setTimeout(()=>controller.abort(),45_000);};
+    try{
+      received();
+      // fetch supports an Authorization header; credentials never enter a URL.
+      const response=await fetch('/v1/auth/session-events',{headers:{Accept:'text/event-stream',Authorization:'Bearer '+attempted},
+        signal:controller.signal,credentials:'omit',redirect:'error',cache:'no-store'});
+      if(!response.ok){
+        const body=await response.json().catch(()=>({})),code=body.error?.code;
+        if(refreshFlight)await refreshFlight.catch(()=>{});
+        if(current()&&session.accessToken===attempted&&['SESSION_REVOKED','ACCOUNT_DISABLED','REFRESH_EXPIRED'].includes(code)){
+          clearSession();notify(code==='ACCOUNT_DISABLED'?'账号不可用':'账号已在其他设备登录或会话已撤销，请重新登录',true);return;
+        }
+        if(response.status===404||response.status===405)retryDelay=300_000;
+        throw Error('Session notifications unavailable');
+      }
+      if(!response.headers.get('Content-Type')?.startsWith('text/event-stream')||!response.body)throw Error('Invalid session stream');
+      const reader=response.body.getReader(),decoder=new TextDecoder();let buffered='';
+      try{
+        while(current()){
+          const part=await reader.read();if(part.done)break;received();
+          buffered+=decoder.decode(part.value,{stream:true}).replace(/\r/g,'');
+          if(buffered.length>8192)throw Error('Session notification exceeds limit');
+          let end;
+          while((end=buffered.indexOf('\n\n'))>=0){
+            const block=buffered.slice(0,end);buffered=buffered.slice(end+2);
+            let event='',data='';for(const line of block.split('\n')){if(line.startsWith('event:'))event=line.slice(6).trim();if(line.startsWith('data:'))data+=line.slice(5).trimStart();}
+            if(!data)continue;
+            const message=JSON.parse(data);if(message.sessionId!==state.sessionId)throw Error('Session notification mismatch');
+            if(event==='ready')state.failures=0;
+            if(event==='revoked'&&['SESSION_REVOKED','ACCOUNT_DISABLED'].includes(message.code)&&current()){
+              clearSession();notify(message.code==='ACCOUNT_DISABLED'?'账号不可用':'账号已在其他设备登录或会话已撤销，请重新登录',true);return;
+            }
+          }
+        }
+      }finally{await reader.cancel().catch(()=>{});}
+    }catch{/* Connection loss and unsupported streams never sign out a valid session. */}
+    finally{
+      clearTimeout(state.idle);controller.abort();
+      if(current()){
+        const delay=retryDelay??Math.min(60_000,1000*2**Math.min(state.failures++,6));
+        state.retry=setTimeout(connect,delay);
+      }
+    }
+  }
+  void connect();
+}
+window.addEventListener('online',()=>{if(session)startSessionFeed();});
+function clearSession(){stopSessionFeed();web.reset();epoch++;$('subnav').replaceChildren();shell.classList.add('signed-out');session=null;refreshFlight=null;document.querySelectorAll('dialog').forEach(d=>d.close());if(nav){nav.remove();nav=null;}$('account').replaceChildren();loginPage(false,'',false);}
 async function raw(path,{method='GET',body,token,key}={}){if(!path.startsWith('/v1/'))throw Error('接口地址无效');const headers={Accept:'application/json'};if(token)headers.Authorization='Bearer '+token;if(key)headers['Idempotency-Key']=key;const multipart=body instanceof FormData;if(body!==undefined&&!multipart)headers['Content-Type']='application/json';let response;try{response=await fetch(path,{method,headers,body:body===undefined?undefined:multipart?body:JSON.stringify(body),cache:'no-store',credentials:'omit',redirect:'error'});}catch{throw Error('连接失败；若已提交修改，请刷新核对结果后再重试。');}let data={};if(response.status!==204){try{data=await response.json();}catch{throw Error('服务返回了无法读取的结果，请重新检查连接。');}}if(!response.ok){const missingModelService=response.status===404&&['/v1/models/catalog','/v1/admin/coze-models'].includes(path.split('?')[0]);const e=Error(missingModelService?'当前后台尚未提供模型目录，配套模型服务还未上线':data.error?.message||'服务请求失败');e.code=missingModelService?'MODEL_SERVICE_NOT_DEPLOYED':data.error?.code;e.status=response.status;e.recoveryAvailable=data.error?.recoveryAvailable===true;throw e;}return data;}
 async function refresh(savedEpoch,attempted){if(!session||epoch!==savedEpoch)throw Error('账号已切换，请重新操作');if(session.accessToken!==attempted)return;if(!refreshFlight){const token=session.refreshToken;refreshFlight=(async()=>{try{const next=await raw('/v1/auth/refresh',{method:'POST',body:{refreshToken:token,clientId:'web'}});if(epoch!==savedEpoch)throw Error('账号已切换');session=next;accountHeader();}catch(e){if(epoch===savedEpoch)clearSession();throw e;}finally{refreshFlight=null;}})();}await refreshFlight;}
 async function api(path,{method='GET',body,key}={}){if(!session)throw Error('请先登录');const savedEpoch=epoch,token=session.accessToken;const retrySafe=method==='GET'||!!key;let result;try{result=await raw(path,{method,body,key,token});}catch(e){if(epoch!==savedEpoch)throw Error('账号已切换，请重新操作');if(e.status===401&&retrySafe){if(refreshFlight)await refreshFlight;if(session&&session.accessToken!==token)result=await raw(path,{method,body,key,token:session.accessToken});else if(e.code==='ACCESS_EXPIRED'){await refresh(savedEpoch,token);result=await raw(path,{method,body,key,token:session.accessToken});}else{clearSession();throw e;}}else{if(e.code==='ACCOUNT_DISABLED'||e.code==='SESSION_REVOKED')clearSession();throw e;}}if(epoch!==savedEpoch)throw Error('账号已切换，请重新操作');return result;}
 const mutation=(path,body,method='POST',key=crypto.randomUUID())=>api(path,{method,body,key});
 function accountHeader(){if(!session)return;const a=session.account||{};const accountButton=button('账户',()=>show('profile'),'account-button');accountButton.title=session.principal.phoneNumber||session.principal.username;$('account').replaceChildren(el('span',{class:'balance-mini'},`${a.pointsAvailable??0} 点`),accountButton);}
 async function updateMe(){const me=await api('/v1/me');session={...session,...me};accountHeader();}
-function signedIn(next){disposeAuthScene();shell.classList.remove('signed-out');epoch++;session=next;web.loadPreferences();accountHeader();buildNav();void perform(async()=>{await show('banks');const saved=epoch;const data=await api('/v1/announcements');if(saved!==epoch||!data.items.length)return;const a=data.items[0];let box;box=dialog(a.title,[el('div',{class:'pre'},a.body),el('p',{class:'muted'},'')],'此版本不再提醒',async()=>{await api(`/v1/announcements/${a.id}/dismiss`,{method:'POST',body:{version:a.version}});notify('已设置当前版本不再提醒');});});}
+function signedIn(next){disposeAuthScene();shell.classList.remove('signed-out');epoch++;session=next;startSessionFeed();web.loadPreferences();accountHeader();buildNav();void perform(async()=>{await show('banks');const saved=epoch;const data=await api('/v1/announcements');if(saved!==epoch||!data.items.length)return;const a=data.items[0];let box;box=dialog(a.title,[el('div',{class:'pre'},a.body),el('p',{class:'muted'},'')],'此版本不再提醒',async()=>{await api(`/v1/announcements/${a.id}/dismiss`,{method:'POST',body:{version:a.version}});notify('已设置当前版本不再提醒');});});}
 function buildNav(){nav?.remove();nav=el('nav',{'aria-label':'主导航',class:'main-nav'});const links=[['search','搜题'],['banks','题库'],['profile','我的']];if(session.principal.roles.includes('admin'))links.push(['users','管理']);for(const[key,label]of links){const b=button(label,()=>show(key));b.dataset.page=key;nav.append(b);}shell.prepend(nav);}
 function sectionFor(name){return ['users','review','releases','models','manageAnnouncements','audit'].includes(name)?'users':['banks','imports'].includes(name)?'banks':['search','userModels','modelSettings','byok'].includes(name)?'search':'profile';}
 function secondaryNav(name){const group=sectionFor(name);const groups={banks:[],search:[],users:[['users','用户管理'],['review','题库审核'],['releases','发布记录'],['models','AI 模型'],['manageAnnouncements','公告管理'],['audit','操作日志']],profile:[]};const links=groups[group]||[];const tabs=links.map(([key,label])=>{const b=button(label,()=>show(key),name===key?'selected':'');b.dataset.page=key;if(name===key)b.setAttribute('aria-current','page');return b;});$('subnav').className=group==='users'?'admin-subnav':'';if(group==='users'){const picker=select('管理分区',Object.fromEntries(links),name);picker.node.classList.add('subnav-select');picker.input.addEventListener('change',()=>{const page=picker.input.value;void perform(()=>show(page));});tabs.push(picker.node);}$('subnav').replaceChildren(...tabs);document.querySelectorAll('.main-nav button').forEach(b=>{b.classList.toggle('selected',b.dataset.page===group);if(b.dataset.page===group)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});}

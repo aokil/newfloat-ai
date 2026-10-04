@@ -14,6 +14,7 @@ import { adminRoutes } from './admin-routes.js';
 import { registerAppUpdateRoutes } from './app-updates.js';
 import { aiRoutes } from './ai-routes.js';
 import { registerPaymentRoutes } from './payment-routes.js';
+import { SessionEvents, registerSessionEvents } from './session-events.js';
 const UPLOAD_LIMIT = 10 * 1024 * 1024;
 const missing = () => { throw new ApiError(404, 'NOT_FOUND', '未找到可访问的记录'); };
 const conflict = message => { throw new ApiError(409, 'VERSION_CONFLICT', message); };
@@ -81,6 +82,10 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
     const app = Fastify({ logger: logger ? { level: 'info', redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body.apiKey', 'req.body.byok.apiKey', 'res.headers.set-cookie'] } : false,
         bodyLimit: 4 * 1024 * 1024, trustProxy, requestTimeout: 30000 });
     app.decorate('store', store);
+    const sessionEvents = new SessionEvents(store);
+    store.sessionEvents = sessionEvents;
+    sessionEvents.start();
+    app.addHook('preClose', async () => await sessionEvents.close());
     app.addHook('onClose', async () => await store.close());
     let recoveryTask = null;
     const recoveryTimer = setInterval(() => {
@@ -109,6 +114,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
                 ...(error instanceof ApiError && error.details?.recoveryAvailable === true ? { recoveryAvailable: true } : {}) } });
     });
     const auth = async (req) => { req.auth = await authenticate(store, req); };
+    registerSessionEvents(app,store,sessionEvents);
     const admin = async (req) => { await auth(req); if (req.auth.role !== 'admin')
         throw new ApiError(403, 'FORBIDDEN', '需要管理员权限'); };
     const authConfig = { config: { rateLimit: rateLimits ? { max: 12, timeWindow: '1 minute' } : false } };
@@ -226,6 +232,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
                 await sms.consumePrepared(proof, fresh.id);
                 await store.run('UPDATE users SET password_hash=? WHERE id=?', hash, fresh.id);
                 await store.run('UPDATE sessions SET revoked=1 WHERE user_id=?', fresh.id);
+                await sessionEvents.changed(fresh.id);
                 await store.audit(fresh.id, 'password-reset', fresh.id);
             });
             reply.code(204).send();
@@ -251,6 +258,8 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         const used = await store.get('SELECT * FROM used_refresh WHERE token_hash=?', token);
         if (used) {
             await store.run('UPDATE sessions SET revoked=1 WHERE family_id=?', used.family_id);
+            const revoked = await store.get('SELECT user_id FROM sessions WHERE family_id=?',used.family_id);
+            if (revoked) await sessionEvents.changed(revoked.user_id);
             return { reused: true };
         }
         const session = await store.get('SELECT * FROM sessions WHERE refresh_hash=?', token);
@@ -296,8 +305,10 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
             fields(req.body, ['refreshToken', 'clientId']);
             session = await store.get('SELECT * FROM sessions WHERE refresh_hash=? AND client_id=?', sha256(text(req.body.refreshToken, 'refreshToken', 32, 128)), req.body.clientId);
         }
-        if (session)
+        if (session) await store.transaction(async () => {
             await store.run('UPDATE sessions SET revoked=1 WHERE family_id=?', session.family_id);
+            await sessionEvents.changed(session.user_id);
+        });
         reply.code(204).send();
     });
     app.post('/v1/auth/change-password', { preHandler: auth, ...authConfig }, async (req, reply) => {
@@ -311,7 +322,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         const hash = await hashPassword(req.body.newPassword);
         await testHooks.beforePasswordCommit?.(user);
         await store.transaction(async () => { await authenticate(store, req); const fresh = await store.get('SELECT * FROM users WHERE id=?', user.id); if (fresh.password_hash !== user.password_hash)
-            conflict('密码已变化，请重新登录'); await store.run('UPDATE users SET password_hash=? WHERE id=?', hash, user.id); await store.run('UPDATE sessions SET revoked=1 WHERE user_id=?', user.id); await store.audit(user.id, 'change-password', user.id); });
+            conflict('密码已变化，请重新登录'); await store.run('UPDATE users SET password_hash=? WHERE id=?', hash, user.id); await store.run('UPDATE sessions SET revoked=1 WHERE user_id=?', user.id); await sessionEvents.changed(user.id); await store.audit(user.id, 'change-password', user.id); });
         reply.code(204).send();
     });
     async function idem(req, digest, fn) {

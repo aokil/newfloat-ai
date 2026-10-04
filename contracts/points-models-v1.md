@@ -48,10 +48,12 @@
 成功响应：
 
 ```json
-{"requestId":"ai_...","status":"completed","source":"ai","model":{"key":"doubao-mini","name":"豆包 Mini","provider":"doubao","mode":"builtin"},"answer":"答案","explanation":"解析","pointsCharged":1,"pointsAvailable":9,"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}
+{"requestId":"ai_...","status":"completed","source":"ai","model":{"key":"doubao-mini","name":"豆包 Mini","provider":"doubao","mode":"builtin"},"answer":"A","explanation":"","pointsCharged":1,"pointsAvailable":9,"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}
 ```
 
 相同键的已完成请求返回原答案与当前余额，不再次调用/扣费；进行中返回 409 `AI_REQUEST_PENDING`，客户端稍后以相同键和请求重试。失败请求同键重试重放失败，不自动重发给供应商；用户显式重新尝试应生成新键。相同键换题/模型/Key 为 409 `IDEMPOTENCY_CONFLICT`。
+
+2026-10-04 精简答案源码规则（待构建/部署）：模型生成仅要求 `answer` 字段；接口继续提供空字符串 `explanation` 兼容旧客户端。选择仅返回当前选项字母，多选以顿号分隔，判断仅返回“对/错”，填空/简答返回最短必要答案；格式无效或无答案走失败释放预占。客户端可在 `question` 首行加入已识别的 `题型：…`，其余仅为清理后的题干与选项；幂等摘要仍按完整原请求计算。HTTP 提供商按题型采用不超过原配置的 128／512 输出预算；Coze 通过提示词要求精简，SDK 的既有回执用量检查不等于供应商生成硬限额。实际 token 节省未测量。
 
 客户端断连或切页不会自动取消已发给供应商的请求：若取得有效答案，答案回执和扣点原子提交，稍后可取回；没有有效答案则释放预占。客户端不得因为没有收到响应就用新幂等键自动重发。每次预占截止为供应商超时加 15 秒；启动及每 15 秒恢复过期项，进程崩溃不会留下永久预占。
 

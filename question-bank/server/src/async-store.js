@@ -47,12 +47,18 @@ export class AsyncSqliteStore {
   async all(sql, ...params) {return this._operation(() => this.store.all(sql, ...params));}
   async run(sql, ...params) {return this._operation(() => this.store.run(sql, ...params));}
   async exec(sql) {return this._operation(() => this.store.db.exec(sql));}
+  afterCommit(action) {
+    const context = this._context.getStore();
+    if (context) context.root.afterCommit.push(action);
+    else action();
+  }
   async transaction(fn) {
     if (typeof fn !== 'function') throw new TypeError('A database transaction callback is required');
     const parent = this._context.getStore();
     if (parent) return this._scoped(parent, async () => {
       const name = `float_ai_savepoint_${++parent.root.savepoint}`;
       const context = {active:true,tail:Promise.resolve(),root:parent.root};
+      const pendingCallbacks = parent.root.afterCommit.length;
       this.store.db.exec(`SAVEPOINT ${name}`);
       try {
         const result = await this._context.run(context,fn);
@@ -61,6 +67,7 @@ export class AsyncSqliteStore {
         this.store.db.exec(`RELEASE SAVEPOINT ${name}`);
         return result;
       } catch (error) {
+        parent.root.afterCommit.length = pendingCallbacks;
         context.active = false;
         await context.tail;
         try {this.store.db.exec(`ROLLBACK TO SAVEPOINT ${name}`); this.store.db.exec(`RELEASE SAVEPOINT ${name}`);}
@@ -71,13 +78,16 @@ export class AsyncSqliteStore {
     return this._exclusive(async () => {
       if (this._closed) throw new Error('Database is closed');
       this.store.db.exec('BEGIN IMMEDIATE');
-      const context = {active:true,tail:Promise.resolve(),root:{savepoint:0,failed:false}};
+      const context = {active:true,tail:Promise.resolve(),root:{savepoint:0,failed:false,afterCommit:[]}};
       try {
         const result = await this._context.run(context, fn);
         await context.tail;
         context.active = false;
         if (context.root.failed) throw new Error('Database transaction savepoint recovery failed');
         this.store.db.exec('COMMIT');
+        // Notifications run outside the transaction context and never turn a
+        // committed account change into a reported transaction failure.
+        for (const action of context.root.afterCommit) this._context.exit(() => {try {action();} catch {}});
         return result;
       } catch (error) {
         context.active = false;

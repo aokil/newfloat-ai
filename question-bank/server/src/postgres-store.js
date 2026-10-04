@@ -439,7 +439,8 @@ export class PostgresStore {
   constructor(config) {
     this.schema = config?.schema ?? 'float_ai';
     if (typeof this.schema !== 'string' || !/^[a-z][a-z0-9_]{0,62}$/u.test(this.schema) || ['public','pg_catalog','information_schema'].includes(this.schema) || this.schema.startsWith('pg_')) throw new Error('A dedicated PostgreSQL application schema is required');
-    this.pool = new Pool(connectionOptions(config));
+    this._connectionOptions = connectionOptions(config);
+    this.pool = new Pool(this._connectionOptions);
     this.pool.on('error', () => {}); // Active queries surface their errors; never log connection credentials.
     this.kind = 'postgres';
     this._context = new AsyncLocalStorage();
@@ -452,6 +453,28 @@ export class PostgresStore {
     try {await store.init(); return store;} catch (error) {await store.close(); throw error;}
   }
   get schemaVersion() {return this._schemaVersion;}
+  async listenSessionChanges(onChange, onDisconnect) {
+    // A dedicated connection also works when the query pool has max=1.
+    const client = new pg.Client(this._connectionOptions);
+    let closed = false;
+    const lost = () => {if (!closed) {closed = true; onDisconnect(); void client.end().catch(() => {});}};
+    client.on('error', lost);
+    client.on('end', lost);
+    client.on('notification', notice => {
+      if (notice.channel !== 'float_ai_session_changes') return;
+      try {
+        const payload = JSON.parse(notice.payload);
+        if (payload.schema === this.schema && typeof payload.userId === 'string') onChange(payload.userId);
+      } catch {}
+    });
+    try {await client.connect(); await client.query('LISTEN float_ai_session_changes'); if(closed) throw new Error('Session notification connection closed');}
+    catch (error) {closed = true; await client.end().catch(() => {}); throw error;}
+    return async () => {if (!closed) {closed = true; await client.end().catch(() => {});}};
+  }
+  async notifySessionChange(userId) {
+    // pg_notify inside the caller's transaction is delivered only after COMMIT.
+    await this.get('SELECT pg_notify(?,?) AS sent','float_ai_session_changes',JSON.stringify({schema:this.schema,userId}));
+  }
   async _client() {
     const client = await this.pool.connect();
     try {await client.query(`SET search_path TO "${this.schema}", pg_catalog`); return client;}
