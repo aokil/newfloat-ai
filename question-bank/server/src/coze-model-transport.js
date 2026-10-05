@@ -12,6 +12,7 @@ const BRIDGE_ERRORS=Object.freeze({NOT_FOUND:'COZE_INTEGRATION_NOT_READY',
   PROJECT_IDENTITY_UNAVAILABLE:'PROJECT_IDENTITY_UNAVAILABLE',MODEL_AUTH_UNAVAILABLE:'COZE_INTEGRATION_NOT_READY',
   MODEL_LIST_UNAVAILABLE:'COZE_MODEL_LIST_UNAVAILABLE',INVALID_MODEL_REQUEST:'INVALID_PROVIDER_RESPONSE',
   MODEL_NOT_AVAILABLE:'COZE_MODEL_UNAVAILABLE',MODEL_RATE_LIMITED:'PROVIDER_RATE_LIMITED',MODEL_TIMEOUT:'TIMEOUT_UNKNOWN',
+  MODEL_IMAGE_UNSUPPORTED:'MODEL_IMAGE_UNSUPPORTED',
   REQUEST_CANCELLED:'NETWORK_UNKNOWN',MODEL_OUTPUT_LIMIT_EXCEEDED:'TRUNCATED_RESPONSE',MODEL_RESPONSE_INVALID:'INVALID_PROVIDER_RESPONSE',
   MODEL_USAGE_UNAVAILABLE:'USAGE_MISSING',MODEL_RESPONSE_INCOMPLETE:'INCOMPLETE_RESPONSE',MODEL_REQUEST_REJECTED:'PROVIDER_FAILED',
   MODEL_UPSTREAM_UNAVAILABLE:'NETWORK_UNKNOWN'});
@@ -106,7 +107,7 @@ export function configuredCozeBridge(env=process.env){
     if(typeof requestId!=='string'||!/^[A-Za-z0-9_-]{1,128}$/u.test(requestId)||typeof model.modelId!=='string'||!model.modelId.trim()||model.modelId.length>200||/[\r\n\u0000]/u.test(model.modelId)||
       !Number.isSafeInteger(model.timeoutMs)||model.timeoutMs<3000||model.timeoutMs>30000||!Number.isSafeInteger(model.maxOutputTokens)||model.maxOutputTokens<1||model.maxOutputTokens>8192)throw new Error('INVALID_PROVIDER_RESPONSE');
     if(mode==='search'&&(typeof question!=='string'||!question.trim()||question.length>16000))throw new Error('INVALID_ANSWER');
-    const payload=await invoke('POST',{requestId,mode,modelId:model.modelId,...(mode==='search'?{question}:{}),
+    const payload=await invoke('POST',{requestId,mode,modelId:model.modelId,...(mode==='search'?{question,...(context?.image?{image:context.image}:{})}:{}),
       timeoutMs:Math.min(model.timeoutMs-2000,25000),maxOutputTokens:model.maxOutputTokens},model.timeoutMs,requestId);
     return receipt(payload.result,mode);
   }

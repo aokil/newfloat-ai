@@ -1,10 +1,12 @@
 import { BRIDGE_ERRORS } from '../../question-bank/server/src/coze-model-transport.js';
+import { validateAiImage } from '../../question-bank/server/src/ai-image.js';
+import type { AiImagePayload } from '../../question-bank/server/src/ai-image.js';
 import { cozeModelFailureCode, cozeProjectModelCompletion, cozeProjectModelMetadata,
   cozeProjectModelsReady } from './coze-llm.server';
 import type { CozeModelExecutionContext, CozeModelMetadata, CozeSearchResult, CozeTestResult } from './coze-llm.server';
 
 type ModelConfiguration = { modelId: string; timeoutMs: number; maxOutputTokens: number };
-type CallContext = CozeModelExecutionContext & { requestId: string };
+type CallContext = CozeModelExecutionContext & { requestId: string; image?: AiImagePayload };
 export type NativeModelBridge = {
   readonly ready: boolean;
   metadata(): Promise<CozeModelMetadata>;
@@ -33,6 +35,7 @@ function callContext(value: unknown): CallContext {
     throw new Error('INVALID_PROVIDER_RESPONSE');
   }
   const context: CallContext = { requestId: value.requestId };
+  if(value.image!==undefined)context.image=validateAiImage(value.image);
   if (value.headers instanceof Headers) context.headers = value.headers;
   else if (value.headers !== undefined) {
     if (!record(value.headers) || !Object.values(value.headers).every(entry => typeof entry === 'string')) {
@@ -64,7 +67,7 @@ export function nativeModelBridge(): NativeModelBridge {
     }
     try {
       return (await cozeProjectModelCompletion({ requestId: call.requestId, mode, modelId: config.modelId,
-        ...(mode === 'search' ? { question } : {}), timeoutMs: Math.min(config.timeoutMs, 25_000),
+        ...(mode === 'search' ? { question, ...(call.image ? {image:call.image} : {}) } : {}), timeoutMs: Math.min(config.timeoutMs, 25_000),
         maxOutputTokens: config.maxOutputTokens }, call)).result;
     } catch (error: unknown) {
       throw safeFailure(error);

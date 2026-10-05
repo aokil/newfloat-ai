@@ -79,7 +79,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
     await recoverModelTests();
     const sms = phoneVerifier ? new ExternalPhoneService(store, { verifier: phoneVerifier, limits: smsLimits }) : new SmsService(store, { transport: smsTransport, hmacKey: smsHmacKey, limits: smsLimits });
     await sms.initialize();
-    const app = Fastify({ logger: logger ? { level: 'info', redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body.apiKey', 'req.body.byok.apiKey', 'res.headers.set-cookie'] } : false,
+    const app = Fastify({ logger: logger ? { level: 'info', redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body.apiKey', 'req.body.byok.apiKey', 'req.body.image', 'res.headers.set-cookie'] } : false,
         bodyLimit: 4 * 1024 * 1024, trustProxy, requestTimeout: 30000 });
     app.decorate('store', store);
     const sessionEvents = new SessionEvents(store);

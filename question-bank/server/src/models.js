@@ -2,6 +2,7 @@ import {createCipheriv,createDecipheriv,randomBytes} from 'node:crypto';
 import {ApiError,sha256} from './security.js';
 import {catalogEntry} from './model-catalog.js';
 import {ANSWER_ONLY_PROMPT,answerBudget,minimalAnswer} from './answer-only.js';
+import {aiImageUrl} from './ai-image.js';
 export const MODEL_ORIGINS=Object.freeze({deepseek:'https://api.deepseek.com',doubao:'https://ark.cn-beijing.volces.com/api/v3',
   glm:'https://open.bigmodel.cn/api/paas/v4',minimax:'https://api.minimax.io/v1',qwen:'https://dashscope.aliyuncs.com/compatible-mode/v1'});
 export const BYOK_PROVIDERS=Object.freeze(Object.entries(MODEL_ORIGINS).map(([id,baseUrl])=>({id,baseUrl,name:{deepseek:'DeepSeek',doubao:'豆包',glm:'GLM',minimax:'MiniMax',qwen:'Qwen'}[id]})));
@@ -76,10 +77,10 @@ export async function officialModelTest(config,apiKey){
   const {content,...receipt}=await officialCompletion(config,apiKey,[{role:'user',content:'Reply with OK.'}],config.provider==='minimax'?config.maxOutputTokens:Math.min(config.maxOutputTokens,32));
   return {status:'passed',...receipt};
 }
-export async function officialModelSearch(config,apiKey,question){
+export async function officialModelSearch(config,apiKey,question,image=null){
   const {content,...receipt}=await officialCompletion(config,apiKey,[
     {role:'system',content:ANSWER_ONLY_PROMPT},
-    {role:'user',content:question}
+    {role:'user',content:image?[{type:'text',text:question},{type:'image_url',image_url:{url:aiImageUrl(image)}}]:question}
   ],Math.min(config.maxOutputTokens,answerBudget(question)));
   let parsed;try{parsed=JSON.parse(content.replace(/^```(?:json)?\s*/u,'').replace(/\s*```$/u,''));}catch{}
   if(!parsed||typeof parsed!=='object'||Array.isArray(parsed)||typeof parsed.answer!=='string')throw new Error('INVALID_ANSWER');
