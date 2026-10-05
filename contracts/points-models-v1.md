@@ -30,6 +30,8 @@
 
 ## POST /v1/ai/search
 
+2026-10-06 回复兼容源码修正（未部署）：仍要求模型简短输出，允许完整JSON的answer字段、JSON基本值/简单答案数组及完整裸文本答案，统一返回字符串answer和空explanation。空答案、明确未识别/信息不足、损坏结构或缺少完整用量均失败释放预占；不额外调用模型修复格式。图片等待/失败/恢复记录由客户端保存inputMode，历史区分图片方式和本机OCR文字。模型请求协议不兼容使用MODEL_REQUEST_INVALID，空答案使用EMPTY_RESPONSE，不统称回复格式无效。
+
 2026-10-05 图片直传源码补充（未部署）：模型目录每个item新增supportsImages布尔值与capabilities数组。图片能力按绑定的实际modelId及受保护Coze元数据input_types判断；元数据缺失时，仅接受官方资料已确认的精确型号。Coze目录无法确认、未提供此字段的旧后台或其他未知型号不能开启图片。不能从显示名称、品牌或1/2点价格推断。
 
 请求可附加image对象，格式为mimeType（image/jpeg或image/png）及data（无data-URL前缀的标准Base64）。仅接受≤1MiB、每边≤2048且≤400万像素的图片，不接受外部URL。客户端仅发送框选区域、最长边1600、JPEG后台压缩；question使用“请根据图片作答”的简短指令，OCR只用于本机匹配及历史文字。不支持图片的实际模型在预占点数前返回422/MODEL_IMAGE_UNSUPPORTED。

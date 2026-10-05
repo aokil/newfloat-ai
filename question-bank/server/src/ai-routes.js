@@ -6,6 +6,7 @@ import {minimalAnswer} from './answer-only.js';
 import {validateAiImage,aiImageDigest,modelSupportsImages} from './ai-image.js';
 
 const ERROR_MESSAGES={
+  MODEL_REQUEST_INVALID:'模型请求格式不兼容，请更新配套后台后重试，本次未扣平台点数',
   MODEL_IMAGE_UNSUPPORTED:'当前模型不支持图片识别，无法直接发送图片',
   PROVIDER_AUTH_FAILED:'模型 API Key 无效，请检查配置',MODEL_FORBIDDEN:'当前 Key 没有该模型权限',
   PROVIDER_BALANCE_LOW:'模型服务商余额不足',PROVIDER_RATE_LIMITED:'模型服务商请求繁忙，请稍后重试',

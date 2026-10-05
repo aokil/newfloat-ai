@@ -3,6 +3,7 @@ import { Config, HeaderUtils, LLMClient, listModels } from 'coze-coding-dev-sdk'
 import type { LLMModelInfo, Message } from 'coze-coding-dev-sdk';
 import { validateAiImage, aiImageUrl, modelSupportsImages } from '../../question-bank/server/src/ai-image.js';
 import type { AiImagePayload } from '../../question-bank/server/src/ai-image.js';
+import { parseModelAnswer, modelText } from '../../question-bank/server/src/model-answer.js';
 import projectModelSnapshot from './coze-project-models.json';
 import { acceptProductionInjectedResources, productionConfigurationUnchanged } from './coze-workload.server';
 
@@ -437,16 +438,8 @@ function parseUsage(value: unknown): Usage | undefined {
 }
 
 function contentText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) throw new BridgeError(502, 'MODEL_RESPONSE_INVALID', '模型返回格式不正确');
-  let result = '';
-  for (const block of content) {
-    if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') result += block.text;
-    else if (!isRecord(block) || !['reasoning', 'thinking'].includes(String(block.type))) {
-      throw new BridgeError(502, 'MODEL_RESPONSE_INVALID', '模型返回格式不正确');
-    }
-  }
-  return result;
+  try { return modelText(content); }
+  catch { throw new BridgeError(502, 'MODEL_RESPONSE_INVALID', '模型返回内容格式不正确'); }
 }
 
 function safeProviderId(value: unknown): string | undefined {
@@ -454,19 +447,12 @@ function safeProviderId(value: unknown): string | undefined {
 }
 
 function parseAnswer(content: string): { answer: string; explanation: string } {
-  const text = content.trim().replace(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i, '$1').trim();
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    throw new BridgeError(502, 'MODEL_RESPONSE_INVALID', '模型返回格式不正确');
+  try { return parseModelAnswer(content); }
+  catch (error: unknown) {
+    if(error instanceof Error&&error.message==='EMPTY_RESPONSE')
+      throw new BridgeError(502,'MODEL_EMPTY_ANSWER','模型未给出有效答案');
+    throw new BridgeError(502, 'MODEL_RESPONSE_INVALID', '模型答案格式无法读取');
   }
-  if (!isRecord(value) || Object.keys(value).some(key => key !== 'answer' && key !== 'explanation') ||
-    typeof value.answer !== 'string' || !value.answer.trim() || value.answer.length > 12_000 ||
-    (value.explanation !== undefined && (typeof value.explanation !== 'string' || value.explanation.length > 16_000))) {
-    throw new BridgeError(502, 'MODEL_RESPONSE_INVALID', '模型返回格式不正确');
-  }
-  return { answer: value.answer.trim(), explanation: '' };
 }
 
 function messagesFor(body: CompletionBody): Message[] {
