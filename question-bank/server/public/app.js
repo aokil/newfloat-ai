@@ -445,7 +445,7 @@ async function modelForm(m){
   const retry=button('重新读取型号',()=>loadModels());
   const metadataPanel=el('section',{},cozeModel.node,metadataStatus,retry);
   const key=field(m?'新 API Key（留空保留）':'API Key','password'),price=field('每次调用点数','number',m?.pointsPerCall??1);
-  const limit=field('每日调用上限','number',m?.dailyRequestLimit??10),tokens=field('输出 token 预算','number',m?.maxOutputTokens??1024),timeout=field('超时（毫秒）','number',m?.timeoutMs??(m?.execution==='coze'?30000:25000)),remove=el('input',{type:'checkbox'});
+  const tokens=field('输出 token 预算','number',m?.maxOutputTokens??1024),timeout=field('超时（毫秒）','number',m?.timeoutMs??(m?.execution==='coze'?30000:25000)),remove=el('input',{type:'checkbox'});
   const removeNode=m?el('label',{class:'check'},remove,'明确移除已保存的 Key'):null;
   const instruction=el('p',{class:'muted'});
   let available=[],loading=false,closed=false,box;
@@ -468,10 +468,10 @@ async function modelForm(m){
     if(change){key.input.value='';remove.checked=false;timeout.input.value=coze?30000:25000;}
     selection();if(coze&&!available.length&&!loading)void loadModels();
   }
-  box=dialog(m?'编辑模型':'添加模型',[execution.node,binding.node,provider.node,name.node,model.node,metadataPanel,key.node,removeNode,el('div',{class:'grid'},price.node,limit.node,tokens.node,timeout.node),instruction],'保存配置',async operationKey=>{
+  box=dialog(m?'编辑模型':'添加模型',[execution.node,binding.node,provider.node,name.node,model.node,metadataPanel,key.node,removeNode,el('div',{class:'grid'},price.node,tokens.node,timeout.node),instruction],'保存配置',async operationKey=>{
     const coze=isCoze(),selected=available.find(item=>item.model_id===inputValue(cozeModel));
     if(coze&&(!inputValue(binding)||!selected))throw Error('请读取真实型号并选择产品计点档位');
-    const p=inputValue(provider),body={execution:inputValue(execution),provider:p,catalogKey:inputValue(binding)||null,displayName:coze?cozeName(selected):inputValue(name),modelId:coze?selected.model_id:inputValue(model),baseUrl:coze?null:catalog.byokProviders.find(x=>x.id===p).baseUrl,enabled:false,capabilities:['text'],maxOutputTokens:number(tokens),timeoutMs:number(timeout),dailyRequestLimit:number(limit),pointsPerCall:number(price)};
+    const p=inputValue(provider),body={execution:inputValue(execution),provider:p,catalogKey:inputValue(binding)||null,displayName:coze?cozeName(selected):inputValue(name),modelId:coze?selected.model_id:inputValue(model),baseUrl:coze?null:catalog.byokProviders.find(x=>x.id===p).baseUrl,enabled:false,capabilities:['text'],maxOutputTokens:number(tokens),timeoutMs:number(timeout),pointsPerCall:number(price)};
     if(!coze&&inputValue(key))body.apiKey=inputValue(key);if(!coze&&remove.checked)body.removeKey=true;if(m)body.expectedRevision=m.revision;
     try{await mutation('/v1/admin/models'+(m?'/'+m.id:''),body,m?'PATCH':'POST',operationKey);key.input.value='';notify('模型已保存；测试通过并启用后可供用户调用。');await show('models');}
     finally{key.input.value='';delete body.apiKey;}

@@ -107,16 +107,14 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=offici
         if(prior)return {replay:await previousResult(store,prior,digest)};
         const user=await requirePositivePoints(store,req.auth.user_id),now=Date.now();
         if((await store.get("SELECT COUNT(*) AS n FROM ai_requests WHERE user_id=? AND status='pending'",user.id)).n>=3)throw new ApiError(429,'RATE_LIMITED','已有多个模型请求处理中，请稍后重试');
-        if((await store.get('SELECT COUNT(*) AS n FROM ai_requests WHERE user_id=? AND created_at>?',user.id,now-86400000)).n>=200)throw new ApiError(429,'RATE_LIMITED','已达到今日模型调用次数上限');
         let row=null,cost=0;
         if(mode==='builtin'){
           const binding=(await configuredCatalog(store)).get(product.key),reason=modelUnavailableReason(product,binding);
           if(reason||!keyUsable(binding,modelMasterKey))throw new ApiError(503,'MODEL_UNAVAILABLE','该内置模型尚未配置、验证或启用，请选择其他模型');
           row=binding.row;config=binding.config;cost=product.pointsPerCall;
           if(user.points_balance-user.points_reserved<cost)throw new ApiError(402,'INSUFFICIENT_POINTS',`该模型每次需要${cost}点，可用点数不足`);
-          const count=(await store.get('SELECT COUNT(*) AS n FROM ai_requests WHERE model_id=? AND created_at>?',row.id,now-86400000)).n+
-            (await store.get('SELECT COUNT(*) AS n FROM model_tests WHERE model_id=? AND created_at>?',row.id,now-86400000)).n;
-          if(count>=config.dailyRequestLimit)throw new ApiError(429,'MODEL_DAILY_LIMIT','该模型今日调用额度已用完');
+          // Paid searches are governed by the points ledger, not a daily counter.
+          // Legacy dailyRequestLimit values remain stored but are no longer enforced.
           if(config.execution==='coze')secret=null;
           else try{secret=openKey(row.encrypted_key,modelMasterKey);}catch{throw new ApiError(503,'MODEL_UNAVAILABLE','该模型密钥当前不可用，请联系管理员');}
           model={key:product.key,name:config.execution==='coze'?config.displayName:product.name,provider:product.provider,mode};

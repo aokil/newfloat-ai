@@ -4,6 +4,7 @@ import {modelConfig,modelView,sealKey,openKey,officialModelTest,providerFailureC
 const missing=()=>{throw new ApiError(404,'NOT_FOUND','记录不存在');};
 const conflict=()=>{throw new ApiError(409,'VERSION_CONFLICT','记录已变化，请刷新后重试');};
 function timestamp(value){if(value===null||value===undefined)return null;const n=Date.parse(value);if(typeof value!=='string'||!Number.isFinite(n))throw new ApiError(400,'INVALID_REQUEST','日期须为ISO时间或null');return n;}
+// Accept the obsolete dailyRequestLimit field from cached admin pages, but ignore it.
 const modelFields=['execution','provider','displayName','modelId','baseUrl','apiKey','removeKey','enabled','capabilities','maxOutputTokens','timeoutMs','dailyRequestLimit','pointsPerCall','catalogKey','expectedRevision'];
 export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,modelTransport=officialModelTest,cozeBridge=null}){
   const sqlPage=async(req,sql,args=[])=>{const limit=integer(req.query.limit,50,1,200),offset=integer(req.query.cursor,0,0,100000000);const rows=await store.all(sql+' LIMIT ? OFFSET ?',...args,limit+1,offset);return {items:rows.slice(0,limit),nextCursor:rows.length>limit?String(offset+limit):null};};
@@ -128,12 +129,10 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,mo
       const row=await model(req),previous=await store.get('SELECT * FROM model_tests WHERE actor_id=? AND idempotency_key=?',req.auth.user_id,key);
       if(previous){if(previous.request_hash!==digest)throw new ApiError(409,'IDEMPOTENCY_CONFLICT','测试幂等键已用于其他版本');return {replay:previous.result?JSON.parse(previous.result):{testId:previous.id,status:previous.status,errorCode:'AWAITING_PROVIDER_RECONCILIATION'}};}
       if(req.body.expectedRevision!==row.revision)conflict();
-      const config=JSON.parse(row.config),since=Date.now()-86400000;
+      const config=JSON.parse(row.config);
       if(config.execution==='coze'){
         if(!store.cozeBridgeReady?.())throw new ApiError(503,'COZE_INTEGRATION_NOT_READY','Coze 模型集成尚未配置，请联系管理员');
       }else if(!row.encrypted_key)throw new ApiError(422,'VALIDATION_FAILED','API Key未配置');
-      const attempts=(await store.get('SELECT COUNT(*) AS n FROM model_tests WHERE model_id=? AND created_at>?',row.id,since)).n+(await store.get('SELECT COUNT(*) AS n FROM ai_requests WHERE model_id=? AND created_at>?',row.id,since)).n;
-      if(attempts>=config.dailyRequestLimit)throw new ApiError(429,'RATE_LIMITED','已达到模型每日调用预算');
       const secret=config.execution==='coze'?null:openKey(row.encrypted_key,modelMasterKey),testId=id('test');
       await store.run('INSERT INTO model_tests(id,model_id,actor_id,idempotency_key,request_hash,status,created_at) VALUES(?,?,?,?,?,?,?)',testId,row.id,req.auth.user_id,key,digest,'pending',Date.now());
       await store.run("UPDATE models SET last_test_at=?,last_test_status='pending',last_test_error=NULL,last_test_result=? WHERE id=?",Date.now(),JSON.stringify({testId,status:'pending'}),row.id);

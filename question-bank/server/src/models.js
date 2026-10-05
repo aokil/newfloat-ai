@@ -20,7 +20,7 @@ export function modelConfig(input,old={}){
   const value={execution,provider:input.provider??old.provider,displayName:input.displayName??old.displayName,modelId:input.modelId??old.modelId,
     baseUrl:execution==='coze'?null:input.baseUrl??old.baseUrl,enabled:input.enabled??old.enabled??false,capabilities:input.capabilities??old.capabilities??['text'],
     maxOutputTokens:input.maxOutputTokens??old.maxOutputTokens??256,timeoutMs:input.timeoutMs??old.timeoutMs??(execution==='coze'?30000:10000),
-    dailyRequestLimit:input.dailyRequestLimit??old.dailyRequestLimit??10,pointsPerCall:input.pointsPerCall??old.pointsPerCall,
+    pointsPerCall:input.pointsPerCall??old.pointsPerCall,
     catalogKey:input.catalogKey===undefined?(old.catalogKey??null):input.catalogKey};
   if(value.catalogKey!==null){const item=catalogEntry(value.catalogKey);if(!item||item.provider!==value.provider)throw new ApiError(400,'INVALID_REQUEST','模型目录与服务商不匹配');
     if(input.pointsPerCall!==undefined&&input.pointsPerCall!==item.pointsPerCall)throw new ApiError(400,'INVALID_REQUEST','该模型必须使用固定点数档位');value.pointsPerCall=item.pointsPerCall;}
@@ -28,7 +28,7 @@ export function modelConfig(input,old={}){
   if(!Object.keys(MODEL_ORIGINS).includes(value.provider)||(execution==='official'&&value.baseUrl!==MODEL_ORIGINS[value.provider]))throw new ApiError(400,'INVALID_REQUEST','模型服务必须为已核对的官方HTTPS地址');
   for(const key of ['displayName','modelId'])if(typeof value[key]!=='string'||!value[key].trim()||value[key].length>200||/[\r\n\u0000]/u.test(value[key]))throw new ApiError(400,'INVALID_REQUEST','请填写模型名称与真实模型ID');
   if(typeof value.enabled!=='boolean'||!Array.isArray(value.capabilities)||value.capabilities.length!==1||value.capabilities[0]!=='text')throw new ApiError(400,'INVALID_REQUEST','本轮测试仅验证text能力；不能假报图像能力');
-  for(const [key,min,max] of [['maxOutputTokens',1,8192],['timeoutMs',execution==='coze'?3000:1000,30000],['dailyRequestLimit',1,10000],['pointsPerCall',1,1000000]])if(!Number.isSafeInteger(value[key])||value[key]<min||value[key]>max)throw new ApiError(400,'INVALID_REQUEST',`${key}范围无效`);
+  for(const [key,min,max] of [['maxOutputTokens',1,8192],['timeoutMs',execution==='coze'?3000:1000,30000],['pointsPerCall',1,1000000]])if(!Number.isSafeInteger(value[key])||value[key]<min||value[key]>max)throw new ApiError(400,'INVALID_REQUEST',`${key}范围无效`);
   return value;
 }
 function masterKey(value){let key;try{key=Buffer.from(value||'','base64');}catch{}if(key?.length!==32)throw new ApiError(503,'MODEL_KEY_NOT_CONFIGURED','未配置模型密钥加密主密钥');return key;}
