@@ -2,17 +2,17 @@ import {AsyncLocalStorage} from 'node:async_hooks';
 import pg from 'pg';
 
 const {Pool, types} = pg;
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 // All instances share these transaction locks, including single-statement writes.
 const LOCK_NAMESPACE = 1179406145;
 const WRITE_LOCK = 1413564759;
 const MIGRATION_LOCK = 1413564749;
 const APPLICATION_TABLES = ['users','sessions','used_refresh','imports','banks','private_versions','confirmations',
   'reviews','releases','audit','points_ledger','sms_challenges','sms_failures','models','model_tests',
-  'announcements','announcement_dismissals','external_phone_identities','ai_requests','payment_orders'];
+  'announcements','announcement_dismissals','external_phone_identities','ai_requests','payment_orders','user_feedback','app_promotions'];
 
 // Coze can copy newer DDL while preserving an older production version marker.
-// Accept copied structures only after checking the complete version-8/9 contract;
+// Accept copied structures only after checking the complete version-8/9/10 contract;
 // the no-marker recovery additionally requires every business table to be empty.
 const SCHEMA_8_COLUMNS = {
   users:'id:text username:text display_name:text password_hash:text role:text disabled:integer created_at:bigint phone_number:text? phone_verified:integer last_login_at:bigint? membership:text membership_expires:bigint? trial_started:bigint trial_ends:bigint points_balance:bigint points_reserved:bigint revision:integer avatar_id:text?',
@@ -242,17 +242,19 @@ function normalizedDefinition(sql) {
 
 /** Read-only structural preflight; never writes markers, DDL or business rows. */
 export async function assertCopiedApplicationStructure(client, schema) {
-  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete version-8 or version-9 application schema');};
+  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete version-8, version-9 or version-10 application schema');};
   const existing = await client.query('SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname=$1',[schema]);
   const names = new Set(existing.rows.map(row => row.tablename));
-  const payment=names.has('payment_orders'),copiedVersion=payment?9:8;
-  const tableNames = [...APPLICATION_TABLES.filter(name=>name!=='payment_orders'||payment),'schema_metadata'];
-  const columnContract={...SCHEMA_8_COLUMNS,...(payment?{payment_orders:PAYMENT_COLUMNS}:{})};
-  const primaryContract={...SCHEMA_8_PRIMARY,...(payment?{payment_orders:'id'}:{})};
+  const payment=names.has('payment_orders'),community=names.has('user_feedback')||names.has('app_promotions'),copiedVersion=community?10:payment?9:8;
+  if(community&&!payment)fail();
+  const tableNames = [...APPLICATION_TABLES.filter(name=>(community||!['user_feedback','app_promotions'].includes(name))&&(name!=='payment_orders'||payment)),'schema_metadata'];
+  const columnContract={...SCHEMA_8_COLUMNS,...(payment?{payment_orders:PAYMENT_COLUMNS}:{}),...(community?{
+    user_feedback:'id:text user_id:text body:text created_at:bigint',app_promotions:'id:text revision:integer content:text updated_at:bigint updated_by:text'}:{})};
+  const primaryContract={...SCHEMA_8_PRIMARY,...(payment?{payment_orders:'id'}:{}),...(community?{user_feedback:'id',app_promotions:'id'}:{})};
   const uniqueContract={...SCHEMA_8_UNIQUE,...(payment?{payment_orders:['owner_id,idempotency_hash','environment,trade_no']}:{})};
-  const foreignContract={...SCHEMA_8_FOREIGN,...(payment?{payment_orders:{owner_id:'users.id'}}:{})};
+  const foreignContract={...SCHEMA_8_FOREIGN,...(payment?{payment_orders:{owner_id:'users.id'}}:{}),...(community?{user_feedback:{user_id:'users.id'},app_promotions:{updated_by:'users.id'}}:{})};
   const checkContract={...SCHEMA_8_CHECKS,...(payment?{payment_orders:PAYMENT_CHECKS}:{})};
-  const indexContract={...SCHEMA_8_INDEXES,...(payment?{payment_orders_owner:['payment_orders','owner_id,created_at'],payment_orders_pending:['payment_orders','status,expires_at']}:{})};
+  const indexContract={...SCHEMA_8_INDEXES,...(payment?{payment_orders_owner:['payment_orders','owner_id,created_at'],payment_orders_pending:['payment_orders','status,expires_at']}:{}),...(community?{user_feedback_time:['user_feedback','created_at,id']}:{})};
   if (tableNames.some(name => !names.has(name))) fail();
   const columns = await client.query(`SELECT table_name,column_name,data_type,is_nullable,column_default,is_identity,identity_generation
     FROM information_schema.columns WHERE table_schema=$1 AND table_name=ANY($2::text[])`,[schema,tableNames]);
@@ -332,13 +334,19 @@ export async function assertCopiedApplicationStructure(client, schema) {
     if (paymentUnique.size !== 3 || !paymentUnique.has('id') ||
       !paymentUnique.has('owner_id,idempotency_hash') || !paymentUnique.has('environment,trade_no')) fail();
   }
+  if(community) for(const table of ['user_feedback','app_promotions']) {
+    const own=indexes.rows.filter(row=>row.table_name===table);
+    if(own.length!==(table==='user_feedback'?2:1))fail();
+    for(const index of own)if(index.access_method!=='btree'||index.indnatts!==index.indnkeyatts||index.sort_options.some(option=>option!==0)||
+      index.expressions||index.predicate||!index.indisvalid||!index.indisready||index.indisunique!==index.indisprimary)fail();
+  }
   return {tableNames,copiedVersion};
 }
 
 async function assertEmptyCopiedSchema(client, schema) {
   const {tableNames,copiedVersion} = await assertCopiedApplicationStructure(client,schema);
   const populated = await client.query(tableNames.map(name => `SELECT '${name}' AS table_name WHERE EXISTS(SELECT 1 FROM "${name}")`).join(' UNION ALL '));
-  if (populated.rows.length) throw new Error('Copied PostgreSQL schema is not an empty version-8 or version-9 application schema');
+  if (populated.rows.length) throw new Error('Copied PostgreSQL schema is not an empty version-8, version-9 or version-10 application schema');
   return copiedVersion;
 }
 
@@ -432,7 +440,10 @@ qr_code TEXT,trade_no TEXT,receipt_hash TEXT,error_code TEXT,created_at BIGINT N
  expires_at BIGINT NOT NULL,precreate_at BIGINT NOT NULL,checked_at BIGINT,paid_at BIGINT,
 UNIQUE(owner_id,idempotency_hash),UNIQUE(environment,trade_no));
 CREATE INDEX payment_orders_owner ON payment_orders(owner_id,created_at);
-CREATE INDEX payment_orders_pending ON payment_orders(status,expires_at);`
+CREATE INDEX payment_orders_pending ON payment_orders(status,expires_at);`,
+  10: `CREATE TABLE user_feedback(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),body TEXT NOT NULL,created_at BIGINT NOT NULL);
+CREATE INDEX user_feedback_time ON user_feedback(created_at,id);
+CREATE TABLE app_promotions(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,content TEXT NOT NULL,updated_at BIGINT NOT NULL,updated_by TEXT NOT NULL REFERENCES users(id));`
 };
 
 export class PostgresStore {
@@ -516,11 +527,17 @@ export class PostgresStore {
           // the existing marker. Preserve existing users/ledger/models, but do
           // not adopt an unknown or partially copied payment table.
           const structure = await assertCopiedApplicationStructure(client,this.schema);
-          if (structure.copiedVersion !== 9 || names.size !== structure.tableNames.length ||
+          if (structure.copiedVersion < 9 || names.size !== structure.tableNames.length ||
             structure.tableNames.some(name => !names.has(name)))
-            throw new Error('Precopied payment schema is not the complete version-9 application schema');
+            throw new Error('Precopied payment schema is not a complete version-9 or version-10 application schema');
           const paymentRows = await client.query('SELECT 1 AS present FROM payment_orders LIMIT 1');
           if (paymentRows.rows.length) throw new Error('Precopied payment table must be empty before version-8 migration');
+        } else if(next===10 && (names.has('user_feedback')||names.has('app_promotions'))) {
+          const structure=await assertCopiedApplicationStructure(client,this.schema);
+          if(structure.copiedVersion!==10||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
+            throw new Error('Precopied community schema is not the complete version-10 application schema');
+          const populated=await client.query('SELECT 1 AS present FROM user_feedback UNION ALL SELECT 1 AS present FROM app_promotions LIMIT 1');
+          if(populated.rows.length)throw new Error('Precopied community tables must be empty before version-10 migration');
         } else await client.query(MIGRATIONS[next]);
         if (next === 3) {
           const imports = await client.query('SELECT id,preview FROM imports');
