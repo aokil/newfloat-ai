@@ -64,7 +64,7 @@ function failure(request: Request, error: GatewayError): Response {
   const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
     'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'" };
   const body = new URL(request.url).pathname === '/' && error.status === 503
-    ? '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>题屿</title><main><h1>题屿</h1><p>服务暂未就绪，请稍后重试。</p></main></html>'
+    ? '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>float ai</title><main><h1>float ai</h1><p>服务暂未就绪，请稍后重试。</p></main></html>'
     : JSON.stringify({ error: { code: error.code,
       message: error.status === 503 ? '服务暂未就绪' : '请求暂时无法完成',
       retryable: error.status >= 500,

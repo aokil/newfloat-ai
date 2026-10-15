@@ -3,7 +3,7 @@ import './globals.css';
 
 // Used only for framework fallback pages; normal HTML comes from the bank server.
 export const metadata: Metadata = {
-  title: '题屿',
+  title: 'float ai',
   description: '题库与浮窗检索',
   robots: { index: false, follow: false },
 };

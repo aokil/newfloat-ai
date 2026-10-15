@@ -58,13 +58,18 @@ await test('HEAD preserves MIME and length but returns no response body', async 
   }
 });
 
-await test('PROD always falls through; DEV marker also supports a production-built preview', async () => {
+await test('allowlisted public files serve in PROD with strict CSP and in a production-built DEV preview', async () => {
   for (const nodeEnv of ['development', 'production', undefined]) {
     const production = createPreviewFileServer({ NODE_ENV: nodeEnv, COZE_PROJECT_ENV: 'PROD' }, publicRoot);
-    assert.equal(await production(request('/')), null);
-    assert.equal(await production(request('/workspace.js')), null);
+    const home = await production(request('/'));
+    assert.equal(home.status, 200);
+    assert.equal((await production(request('/workspace.js'))).status, 200);
+    const csp = home.headers.get('content-security-policy');
+    assert.ok(csp.includes("script-src 'self'"));
+    assert.ok(csp.includes("frame-ancestors 'none'"));
+    assert.ok(!csp.includes("'unsafe-inline'"));
   }
-  assert.equal(await createPreviewFileServer({ NODE_ENV: 'production' }, publicRoot)(request('/')), null);
+  assert.equal((await createPreviewFileServer({ NODE_ENV: 'production' }, publicRoot)(request('/'))).status, 200);
   const markedDev = createPreviewFileServer({ NODE_ENV: 'production', COZE_PROJECT_ENV: 'DEV' }, publicRoot);
   assert.equal((await markedDev(request('/'))).status, 200);
 });

@@ -136,7 +136,7 @@ try {
       const result = await createGateway({ ...env, TIYU_UPSTREAM_URL: url })(request());
       assert.equal(result.status, 503);
       const text = await result.text();
-      assert.match(text, /题屿/);
+      assert.match(text, /float ai/);
       assert.ok(!text.includes(key));
     }
     for (const pathname of ['/admin', '/v1/a%2fb', '/v1/a%5cb', '/v1/a%0db', '//example.invalid/']) {
