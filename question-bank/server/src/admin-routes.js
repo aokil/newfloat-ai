@@ -31,7 +31,15 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,mo
   app.post('/v1/admin/users/:id/points-adjustments',{preHandler:admin},async req=>await change(req,['delta','expectedRevision','reason'],'points-adjustment',async(u,reason)=>{
     if(req.body.expectedRevision!==u.revision)conflict();await points(store,u,req.body.delta,req.auth.user_id,reason,`admin:${req.auth.user_id}:${req.url}:${req.headers['idempotency-key']}`);
   }));
-  const ledger=async(req,userId)=>{const page=await sqlPage(req,'SELECT id,delta,balance_before AS balanceBefore,balance_after AS balanceAfter,reason,actor_id AS actorId,created_at AS createdAt FROM points_ledger WHERE user_id=? ORDER BY created_at DESC,id',[userId]);page.items.forEach(i=>i.createdAt=new Date(i.createdAt).toISOString());return page;};
+  const ledger=async(req,userId)=>{
+    const direction=req.query.direction;
+    if(direction!==undefined&&!['increase','decrease'].includes(direction))throw new ApiError(400,'INVALID_REQUEST','明细分类无效');
+    // Filter before LIMIT/OFFSET so sparse credits are not hidden by recent debits.
+    const sign=direction==='increase'?' AND delta>0':direction==='decrease'?' AND delta<0':'';
+    const page=await sqlPage(req,'SELECT id,delta,balance_before AS balanceBefore,balance_after AS balanceAfter,reason,actor_id AS actorId,created_at AS createdAt FROM points_ledger WHERE user_id=?'+sign+' ORDER BY created_at DESC,id',[userId]);
+    page.items.forEach(i=>i.createdAt=new Date(i.createdAt).toISOString());
+    return direction===undefined?page:{...page,direction};
+  };
   app.get('/v1/me/points-ledger',{preHandler:auth},async req=>await ledger(req,req.auth.user_id));
   app.get('/v1/admin/users/:id/points-ledger',{preHandler:admin},async req=>await ledger(req,(await user(req)).id));
   app.get('/v1/admin/audit',{preHandler:admin},async req=>await sqlPage(req,'SELECT id,actor_id AS actorId,action,target_id AS targetId,details,created_at AS createdAt FROM audit ORDER BY id DESC'));

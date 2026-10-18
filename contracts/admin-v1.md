@@ -30,12 +30,18 @@ GET /v1/admin/users?search=&membership=&disabled=&limit=50&cursor=... 返回item
 | POST /v1/admin/users/:id/status | {disabled,expectedRevision,reason}，禁用同时撤销全部会话 |
 | POST /v1/admin/users/:id/revoke-sessions | {reason}，强制退出全部客户端 |
 | POST /v1/admin/users/:id/points-adjustments | {delta,expectedRevision,reason}，安全整数增减并留流水 |
-| GET /v1/admin/users/:id/points-ledger | 分页流水 |
-| GET /v1/me/points-ledger | 仅本人分页流水 |
+| GET /v1/admin/users/:id/points-ledger | 分页流水，可选direction=increase/decrease |
+| GET /v1/me/points-ledger | 仅本人分页流水，可选direction=increase/decrease |
 | GET /v1/admin/audit | 分页操作者、动作、目标、时间、结果与脱敏变更摘要 |
 | GET /v1/admin/releases | 发布历史，含releaseId、bankId、dataVersion、releaseSequence、title、state、sourceBankId、sourceDataVersion，供刷新后撤回 |
 
 禁用后登录、更新、下载、AI立即服务端拒绝；启用不恢复旧token。禁止自我封禁及封禁最后一个可用管理员。本人/管理员查看题库沿cloud-v1，管理员日常手机检索不自动获得所有私库。
+
+### 点数明细分类（2026-10-18，仅源码）
+
+两条流水接口保留limit/cursor分页及created_at倒序。省略direction仍返回全部记录及原items/nextCursor结构；传increase只返回delta>0，decrease只返回delta<0，其他值返回400 INVALID_REQUEST。筛选在LIMIT/OFFSET之前完成，游标只在对应分类内使用；已指定分类的响应额外回显direction。普通用户归属仍取req.auth.user_id，不信任查询中的userId，不修改余额或账本。
+
+新版Android有同框“点数增加/点数消耗”，按选中分类请求并校验响应回显，防止旧后台忽略筛选后显示错误分类或假空列表。需要配套更新后台；本轮尚未部署。
 
 ## 会员、试用与功能许可
 
