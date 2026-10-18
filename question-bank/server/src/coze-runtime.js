@@ -3,6 +3,7 @@ import {buildApp} from './app.js';
 import {PostgresStore} from './postgres-store.js';
 import {configuredSupabasePhone} from './supabase-phone.js';
 import {configuredAlipayTransport} from './alipay.js';
+import {AndroidReleaseCampaign} from './android-release-campaign.js';
 
 /** Native Coze entry; credentials arrive in memory from the platform SDK. */
 export async function createCozeApp({databaseUrl,phoneConfiguration,cozeBridge,env=process.env}) {
@@ -26,7 +27,8 @@ export async function createCozeApp({databaseUrl,phoneConfiguration,cozeBridge,e
     const app=await buildApp({store,phoneVerifier,cozeBridge,paymentTransport,
       smsHmacKey:derive('float-ai/sms-proof/v1').toString('hex'),
       modelMasterKey:env.MODEL_MASTER_KEY || derive('float-ai/model-key/v1').toString('base64'),
-      bootstrapAdminPhone:env.BOOTSTRAP_ADMIN_PHONE || null,trustProxy:1});
+      bootstrapAdminPhone:env.BOOTSTRAP_ADMIN_PHONE || null,trustProxy:1,
+      androidReleaseCampaign:env.COZE_PROJECT_ENV==='PROD'?new AndroidReleaseCampaign():null});
     app.decorate('phoneReady',Boolean(phoneVerifier));
     await app.ready();
     return app;

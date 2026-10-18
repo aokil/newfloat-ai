@@ -16,6 +16,7 @@ import { aiRoutes } from './ai-routes.js';
 import { registerPaymentRoutes } from './payment-routes.js';
 import { registerSessionEvents } from './session-events.js';
 import { communityRoutes } from './community-routes.js';
+import {registerAndroidReleaseCampaign} from './android-release-campaign.js';
 const UPLOAD_LIMIT = 10 * 1024 * 1024;
 const missing = () => { throw new ApiError(404, 'NOT_FOUND', '未找到可访问的记录'); };
 const conflict = message => { throw new ApiError(409, 'VERSION_CONFLICT', message); };
@@ -59,7 +60,7 @@ function indexedQuestions(payload) {
     });
     return { questions, typeCounts: { ...counts } };
 }
-export async function buildApp({ database = ':memory:', store: providedStore = null, logger = false, rateLimits = true, smsTransport = null, smsHmacKey = null, smsLimits = true, phoneVerifier = null, testHooks = {}, modelMasterKey = null, modelTransport, aiTransport, cozeBridge = null, paymentTransport = null, appUpdateDirectory = null, trustProxy = ['127.0.0.1', '::1'], bootstrapAdminPhone = null } = {}) {
+export async function buildApp({ database = ':memory:', store: providedStore = null, logger = false, rateLimits = true, smsTransport = null, smsHmacKey = null, smsLimits = true, phoneVerifier = null, testHooks = {}, modelMasterKey = null, modelTransport, aiTransport, cozeBridge = null, paymentTransport = null, appUpdateDirectory = null, trustProxy = ['127.0.0.1', '::1'], bootstrapAdminPhone = null, androidReleaseCampaign = null } = {}) {
     const store = providedStore || await AsyncSqliteStore.open(database);
     if (bootstrapAdminPhone !== null) bootstrapAdminPhone = phoneNumber(bootstrapAdminPhone);
     // Runtime readiness is shared with catalog/account checks; no credentials or
@@ -110,7 +111,8 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         reply.code(status).send({ error: { code, message: publicMessage, requestId: request.id, retryable: status === 429 || status >= 500,
                 ...(error instanceof ApiError && error.details?.recoveryAvailable === true ? { recoveryAvailable: true } : {}) } });
     });
-    const auth = async (req) => { req.auth = await authenticate(store, req); };
+    const auth = async (req) => { req.auth = await authenticate(store, req); await androidReleaseCampaign?.requireSupported(req,req.auth.client_id); };
+    if(androidReleaseCampaign)registerAndroidReleaseCampaign(app,{store,auth,campaign:androidReleaseCampaign});
     registerSessionEvents(app);
     const admin = async (req) => { await auth(req); if (req.auth.role !== 'admin')
         throw new ApiError(403, 'FORBIDDEN', '需要管理员权限'); };
@@ -132,6 +134,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
     app.get('/health', async () => { await store.get('SELECT 1 AS ready'); return { status: 'ok', schemaVersion: store.schemaVersion, storage: store.kind || 'sqlite' }; });
     app.post('/v1/auth/registration-code', authConfig, async (req, reply) => { fields(req.body, ['username']); const result = await sms.challenge(req.body.username, req.ip, { purpose: 'registration' }); reply.code(202); return result; });
     app.post('/v1/auth/register', authConfig, async (req, reply) => {
+        await androidReleaseCampaign?.requireSupported(req,req.body?.clientId);
         const data = credentials(req.body, true);
         rateName(data.username);
         text(req.body.challengeId, 'challengeId', 1, 128);
@@ -169,6 +172,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         }
     });
     app.post('/v1/auth/login', authConfig, async (req) => {
+        await androidReleaseCampaign?.requireSupported(req,req.body?.clientId);
         const data = credentials(req.body);
         rateName(data.username);
         const user = await store.get('SELECT * FROM users WHERE username=?', data.username);
@@ -246,6 +250,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         }
     });
     app.post('/v1/auth/refresh', authConfig, async (req) => {
+        await androidReleaseCampaign?.requireSupported(req,req.body?.clientId);
         fields(req.body, ['refreshToken', 'clientId']);
         const token = sha256(text(req.body.refreshToken, 'refreshToken', 32, 128));
         if (!['web', 'android'].includes(req.body.clientId))
