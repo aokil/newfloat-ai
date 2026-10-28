@@ -9,8 +9,12 @@ export const MODEL_CATALOG = Object.freeze([
   {key:'glm-4-7',name:'GLM 4.7',provider:'glm',pointsPerCall:1},
   {key:'minimax-2-5',name:'MiniMax M2.5',provider:'minimax',pointsPerCall:1},
   {key:'minimax-2-7',name:'MiniMax M2.7',provider:'minimax',pointsPerCall:1},
-  {key:'qwen-plus',name:'Qwen 3.5 Plus',provider:'qwen',pointsPerCall:1}
+  {key:'qwen-plus',name:'Qwen 3.5 Plus',provider:'qwen',pointsPerCall:1},
+  {key:'baichuan-m2',name:'百川 M2',provider:'baichuan',pointsPerCall:1},
+  {key:'baichuan-m3',name:'百川 M3',provider:'baichuan',pointsPerCall:2}
 ].map(item=>Object.freeze(item)));
+
+export const BAICHUAN_MODEL_IDS=Object.freeze({'baichuan-m2':'Baichuan-M2','baichuan-m3':'Baichuan-M3'});
 
 export function catalogEntry(key) { return MODEL_CATALOG.find(item=>item.key===key); }
 
@@ -21,7 +25,8 @@ export async function configuredCatalog(store) {
     if(!catalogEntry(config.catalogKey))continue;
     // Conflicting legacy/manual rows fail closed instead of picking a model.
     if(configured.has(config.catalogKey))configured.set(config.catalogKey,null);
-    else configured.set(config.catalogKey,{row,config,bridgeReady:store.cozeBridgeReady?.()===true});
+    else configured.set(config.catalogKey,{row,config,bridgeReady:store.cozeBridgeReady?.()===true,
+      environmentKeyFingerprint:config.provider==='baichuan'?store.environmentModelKeyFingerprint?.('baichuan')??null:null});
   }
   return configured;
 }
@@ -30,7 +35,12 @@ export function modelUnavailableReason(item,binding) {
   if(!binding)return 'MODEL_NOT_CONFIGURED';
   const {row,config}=binding;
   if(config.provider!==item.provider||config.pointsPerCall!==item.pointsPerCall)return 'MODEL_CONFIG_MISMATCH';
-  if(config.execution==='coze'){
+  if(config.provider==='baichuan'){
+    if(config.execution!=='official'||config.baseUrl!=='https://api.baichuan-ai.com/v1'||
+      config.modelId!==BAICHUAN_MODEL_IDS[item.key]||config.maxOutputTokens!==2048||row.encrypted_key)return 'MODEL_CONFIG_MISMATCH';
+    if(!binding.environmentKeyFingerprint)return 'MODEL_KEY_NOT_CONFIGURED';
+    if(row.key_fingerprint!==binding.environmentKeyFingerprint)return 'MODEL_NOT_VERIFIED';
+  }else if(config.execution==='coze'){
     if(config.baseUrl!==null||row.encrypted_key)return 'MODEL_CONFIG_MISMATCH';
     if(!binding.bridgeReady)return 'COZE_INTEGRATION_NOT_READY';
   }else{

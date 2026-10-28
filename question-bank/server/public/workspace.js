@@ -65,7 +65,8 @@ window.FloatWorkspace = function (ctx) {
   function priceTable() {
     const rows = [
       ['豆包 Mini、豆包 Lite', 1], ['Qwen 3.5 Plus', 1], ['MiniMax M2.5、MiniMax M2.7', 1],
-      ['GLM 4.7', 1], ['GLM 5.0、GLM 5-Turbo', 2], ['豆包 2.1 Pro', 2]
+      ['GLM 4.7', 1], ['GLM 5.0、GLM 5-Turbo', 2], ['豆包 2.1 Pro', 2],
+      ['百川 M2（医学推理）', 1], ['百川 M3（医学推理）', 2]
     ];
     return el('table', {class: 'float-price-table'}, el('caption', {}, '内置模型价目'),
       el('thead', {}, el('tr', {}, el('th', {scope: 'col'}, '模型'), el('th', {scope: 'col'}, '每次调用'))),
@@ -168,7 +169,7 @@ window.FloatWorkspace = function (ctx) {
       main.append(el('details', {class: 'float-history-day', open: true}, el('summary', {}, day + ' · ' + rows.length + ' 条'), content));
     }
   }
-  function modelBrand(model) { return model?.provider?.includes('doubao') ? 'doubao' : model?.provider?.includes('glm') ? 'glm' : model?.provider?.includes('mini') ? 'minimax' : model?.provider?.includes('qwen') ? 'qwen' : model?.provider === 'deepseek' ? 'deepseek' : 'custom'; }
+  function modelBrand(model) { return model?.provider?.includes('doubao') ? 'doubao' : model?.provider?.includes('glm') ? 'glm' : model?.provider?.includes('mini') ? 'minimax' : model?.provider?.includes('qwen') ? 'qwen' : model?.provider === 'baichuan' ? 'baichuan' : model?.provider === 'deepseek' ? 'deepseek' : 'custom'; }
   function brandIcon(brand) {
     const source = assets.brands[brand];
     if (!source) return icon('layers-2');
@@ -195,7 +196,7 @@ window.FloatWorkspace = function (ctx) {
       const data = await getCatalog(); if (!alive()) return; replace(area, );
       const grouped = new Map();
       for (const m of data.items) { const brand = modelBrand(m); if (!grouped.has(brand)) grouped.set(brand, []); grouped.get(brand).push(m); }
-      const names = {doubao: '豆包', glm: '智谱 GLM', minimax: 'MiniMax', qwen: '通义千问', deepseek: 'DeepSeek', custom: '其他模型'};
+      const names = {doubao: '豆包', glm: '智谱 GLM', minimax: 'MiniMax', qwen: '通义千问', baichuan: '百川模型（医学推理）', deepseek: 'DeepSeek', custom: '其他模型'};
       for (const [brand, items] of grouped) {
         const section = el('section', {class: 'float-model-group'}, el('h2', {}, brandIcon(brand), names[brand]));
         for (const m of items) {

@@ -9,6 +9,7 @@ const host=process.env.HOST||'127.0.0.1';const port=Number(process.env.PORT||878
 if(!['127.0.0.1','::1','localhost'].includes(host)&&process.env.BEHIND_HTTPS_PROXY!=='true')throw new Error('Non-loopback bind requires BEHIND_HTTPS_PROXY=true and a configured HTTPS reverse proxy');
 const app=await buildApp({database:resolve(process.env.BANK_DATABASE||'data/bank.sqlite'),logger:true,
   smsTransport:configuredSmsTransport(),phoneVerifier:configuredSupabasePhone(),smsHmacKey:process.env.SMS_HMAC_KEY||null,modelMasterKey:process.env.MODEL_MASTER_KEY||null,cozeBridge:configuredCozeBridge(),
+  baichuanApiKey:process.env.BAICHUAN_API_KEY||null,
   paymentTransport:configuredAlipayTransport(),appUpdateDirectory:process.env.APP_UPDATE_DIRECTORY?resolve(process.env.APP_UPDATE_DIRECTORY):null,
   androidReleaseCampaign:new AndroidReleaseCampaign()});
 await app.listen({host,port});

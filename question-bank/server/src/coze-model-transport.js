@@ -1,4 +1,5 @@
 import {createHash,createHmac,randomBytes} from 'node:crypto';
+import {validateExtractedQuestion} from './ocr-extraction.js';
 
 const PROJECT_ID='7689833705046130729';
 const BRIDGE_PATH='/internal/model-completion';
@@ -12,7 +13,7 @@ const BRIDGE_ERRORS=Object.freeze({NOT_FOUND:'COZE_INTEGRATION_NOT_READY',
   PROJECT_IDENTITY_UNAVAILABLE:'PROJECT_IDENTITY_UNAVAILABLE',MODEL_AUTH_UNAVAILABLE:'COZE_INTEGRATION_NOT_READY',
   MODEL_LIST_UNAVAILABLE:'COZE_MODEL_LIST_UNAVAILABLE',INVALID_MODEL_REQUEST:'MODEL_REQUEST_INVALID',
   MODEL_NOT_AVAILABLE:'COZE_MODEL_UNAVAILABLE',MODEL_RATE_LIMITED:'PROVIDER_RATE_LIMITED',MODEL_TIMEOUT:'TIMEOUT_UNKNOWN',
-  MODEL_IMAGE_UNSUPPORTED:'MODEL_IMAGE_UNSUPPORTED',
+  MODEL_IMAGE_UNSUPPORTED:'MODEL_IMAGE_UNSUPPORTED',MODEL_OCR_INCOMPLETE:'OCR_INCOMPLETE',MODEL_OCR_RESPONSE_INVALID:'OCR_RESPONSE_INVALID',
   MODEL_EMPTY_ANSWER:'EMPTY_RESPONSE',
   REQUEST_CANCELLED:'NETWORK_UNKNOWN',MODEL_OUTPUT_LIMIT_EXCEEDED:'TRUNCATED_RESPONSE',MODEL_RESPONSE_INVALID:'INVALID_PROVIDER_RESPONSE',
   MODEL_USAGE_UNAVAILABLE:'USAGE_MISSING',MODEL_RESPONSE_INCOMPLETE:'INCOMPLETE_RESPONSE',MODEL_REQUEST_REJECTED:'PROVIDER_FAILED',
@@ -49,6 +50,7 @@ function receipt(value,mode){
     if(value.status!=='passed')throw new Error('INVALID_TEST_RESULT');
     return {status:'passed',...result};
   }
+  if(mode==='extract')return {...validateExtractedQuestion(value),...result};
   if(typeof value.answer!=='string'||!value.answer.trim()||value.answer.length>16000||typeof value.explanation!=='string'||value.explanation.length>16000)throw new Error('INVALID_ANSWER');
   return {answer:value.answer,explanation:value.explanation,...result};
 }
@@ -108,7 +110,7 @@ export function configuredCozeBridge(env=process.env){
     if(typeof requestId!=='string'||!/^[A-Za-z0-9_-]{1,128}$/u.test(requestId)||typeof model.modelId!=='string'||!model.modelId.trim()||model.modelId.length>200||/[\r\n\u0000]/u.test(model.modelId)||
       !Number.isSafeInteger(model.timeoutMs)||model.timeoutMs<3000||model.timeoutMs>30000||!Number.isSafeInteger(model.maxOutputTokens)||model.maxOutputTokens<1||model.maxOutputTokens>8192)throw new Error('INVALID_PROVIDER_RESPONSE');
     if(mode==='search'&&(typeof question!=='string'||!question.trim()||question.length>16000))throw new Error('INVALID_ANSWER');
-    const payload=await invoke('POST',{requestId,mode,modelId:model.modelId,...(mode==='search'?{question,...(context?.image?{image:context.image}:{})}:{}),
+    const payload=await invoke('POST',{requestId,mode,modelId:model.modelId,...(mode==='search'?{question}:{}),...(mode!=='test'&&context?.image?{image:context.image}:{}),
       timeoutMs:Math.min(model.timeoutMs-2000,25000),maxOutputTokens:model.maxOutputTokens},model.timeoutMs,requestId);
     return receipt(payload.result,mode);
   }
@@ -119,7 +121,8 @@ export function configuredCozeBridge(env=process.env){
       catch{throw new Error('COZE_MODEL_LIST_UNAVAILABLE');}
     },
     test(model,context){return execute('test',model,undefined,context);},
-    search(model,question,context){return execute('search',model,question,context);}});
+    search(model,question,context){return execute('search',model,question,context);},
+    extract(model,image,context){return execute('extract',model,undefined,{...context,image});}});
 }
 
 export {BRIDGE_ERRORS};

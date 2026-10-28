@@ -408,7 +408,8 @@ function revoke(u){const reason=field('操作原因');dialog('强制退出：'+u
 async function reviewBank(b){const releaseKey=crypto.randomUUID();const r=await api(`/v1/admin/banks/${b.bankId}/questions?dataVersion=${encodeURIComponent(b.dataVersion)}&limit=50`),comment=field('审核说明','textarea'),content=el('div',{},el('p',{class:'muted'},`当前版本 ${b.dataVersion}，共${r.total}题。`));let offset=0;const qs=el('div');async function fill(data){qs.replaceChildren(...data.items.map(q=>questionCard(q)));const controls=el('div',{class:'pagination'});if(offset>0)controls.append(button('上一组',async()=>{offset-=50;await fill(await api(`/v1/admin/banks/${b.bankId}/questions?dataVersion=${encodeURIComponent(b.dataVersion)}&offset=${offset}&limit=50`));}));if(offset+50<data.total)controls.append(button('下一组',async()=>{offset+=50;await fill(await api(`/v1/admin/banks/${b.bankId}/questions?dataVersion=${encodeURIComponent(b.dataVersion)}&offset=${offset}&limit=50`));}));qs.append(controls);}await fill(r);content.append(qs,comment.node);let reviewId=null;const publish=button('明确发布此版本',async()=>{if(!reviewId)throw Error('请先审核通过当前版本');await mutation(`/v1/admin/banks/${b.bankId}/releases`,{dataVersion:b.dataVersion,reviewId},'POST',releaseKey);notify('已发布公共快照，其他用户更新后可用');await show('releases');box.close();},'primary');publish.disabled=true;const approve=button('审核通过',async()=>{const r=await api(`/v1/admin/banks/${b.bankId}/reviews`,{method:'POST',body:{dataVersion:b.dataVersion,decision:'approved',comment:inputValue(comment)}});reviewId=r.reviewId;publish.disabled=false;approve.disabled=true;notify('审核通过，尚未公开；点击明确发布才会下发。');});const box=el('dialog',{},el('div',{class:'dialogbody'},el('h2',{},b.title),content,el('div',{class:'dialogactions'},button('关闭',()=>box.close()),button('审核不通过',async()=>{await api(`/v1/admin/banks/${b.bankId}/reviews`,{method:'POST',body:{dataVersion:b.dataVersion,decision:'rejected',comment:inputValue(comment)}});notify('已记录不通过');box.close();}),approve,publish)));box.addEventListener('close',()=>box.remove());document.body.append(box);box.showModal();}
 async function modelForm(m){
   const catalog=await api('/v1/models/catalog');
-  const providers=Object.fromEntries(catalog.byokProviders.map(p=>[p.id,p.name]));
+  const modelProviders=catalog.modelProviders||catalog.byokProviders;
+  const providers=Object.fromEntries(modelProviders.map(p=>[p.id,p.name]));
   const execution=select('接入方式',{official:'供应商官方 API',coze:'Coze 内置集成'},m?.execution||'official');
   const provider=select('服务商',providers,m?.provider||'deepseek');
   const binding=select('产品计点档位',{'':'请选择（官方 API 可仅保存配置）',...Object.fromEntries(catalog.items.map(item=>[item.key,item.name+' · '+item.pointsPerCall+'点/次']))},m?.catalogKey||'');
@@ -424,9 +425,23 @@ async function modelForm(m){
   let available=[],loading=false,closed=false,box;
   key.input.autocomplete='off';key.input.spellcheck=false;key.input.dataset.modelSecret='';
   const isCoze=()=>inputValue(execution)==='coze';
+  const usesEnvironmentKey=()=>inputValue(provider)==='baichuan';
   const cozeName=item=>item.show_name||item.model_name||item.model_id;
   function updateSubmit(){const submit=box?.querySelector('button[type="submit"]');if(submit)submit.disabled=isCoze()&&(loading||!inputValue(binding)||!available.some(item=>item.model_id===inputValue(cozeModel)));}
-  function selection(){const item=catalog.items.find(item=>item.key===inputValue(binding));if(item){provider.input.value=item.provider;price.input.value=item.pointsPerCall;if(!isCoze()&&!inputValue(name))name.input.value=item.name;}provider.input.disabled=!!item;price.input.readOnly=!!item;updateSubmit();}
+  function selection(){
+    const item=catalog.items.find(item=>item.key===inputValue(binding));
+    if(item){provider.input.value=item.provider;price.input.value=item.pointsPerCall;if(!isCoze()&&!inputValue(name))name.input.value=item.name;}
+    const environment=usesEnvironmentKey();
+    if(environment){execution.input.value='official';key.input.value='';remove.checked=false;tokens.input.value=2048;if(item){model.input.value=item.key==='baichuan-m2'?'Baichuan-M2':'Baichuan-M3';name.input.value=item.name;}}
+    const coze=isCoze();
+    provider.input.disabled=!!item;price.input.readOnly=!!item;execution.input.disabled=environment;
+    model.node.hidden=coze;key.node.hidden=coze||environment;metadataPanel.hidden=!coze;
+    name.input.readOnly=coze;model.input.readOnly=environment;tokens.input.readOnly=environment;
+    if(removeNode)removeNode.hidden=coze||environment;
+    instruction.textContent=environment?'百川仅从 Coze 服务端 BAICHUAN_API_KEY 环境密钥读取；生成预算固定 2048、思考预算固定 1024。保存配置后需真实测试通过再启用。'
+      :coze?'使用 Coze 项目授权，无需供应商 Key。选择产品计点档位并核对实际型号；输出预算只校验返回用量，不能限制平台生成。测试成功后再启用。':'选择产品型号后使用固定 1／2 点档位。填写供应商实际模型 ID，保存密钥后测试通过并启用。';
+    updateSubmit();
+  }
   function selectedModel(){const selected=available.find(item=>item.model_id===inputValue(cozeModel));if(selected)name.input.value=cozeName(selected);updateSubmit();}
   async function loadModels(){
     if(loading||closed)return;loading=true;available=[];cozeModel.input.disabled=true;retry.disabled=true;metadataPanel.setAttribute('aria-busy','true');metadataStatus.textContent='正在读取 Coze 项目的真实型号…';updateSubmit();
@@ -436,20 +451,18 @@ async function modelForm(m){
     finally{loading=false;if(!closed){cozeModel.input.disabled=!available.length;retry.disabled=false;metadataPanel.removeAttribute('aria-busy');updateSubmit();}}
   }
   function modeChanged(change=false){
-    const coze=isCoze();model.node.hidden=key.node.hidden=coze;metadataPanel.hidden=!coze;name.input.readOnly=coze;if(removeNode)removeNode.hidden=coze;
-    instruction.textContent=coze?'使用 Coze 项目授权，无需供应商 Key。选择产品计点档位并核对实际型号；输出预算只校验返回用量，不能限制平台生成。测试成功后再启用。':'选择产品型号后使用固定 1／2 点档位。填写供应商实际模型 ID，保存密钥后测试通过并启用。';
-    if(change){key.input.value='';remove.checked=false;timeout.input.value=coze?30000:25000;}
-    selection();if(coze&&!available.length&&!loading)void loadModels();
+    if(change){key.input.value='';remove.checked=false;timeout.input.value=isCoze()?30000:25000;}
+    selection();if(isCoze()&&!available.length&&!loading)void loadModels();
   }
   box=dialog(m?'编辑模型':'添加模型',[execution.node,binding.node,provider.node,name.node,model.node,metadataPanel,key.node,removeNode,el('div',{class:'grid'},price.node,tokens.node,timeout.node),instruction],'保存配置',async operationKey=>{
     const coze=isCoze(),selected=available.find(item=>item.model_id===inputValue(cozeModel));
     if(coze&&(!inputValue(binding)||!selected))throw Error('请读取真实型号并选择产品计点档位');
-    const p=inputValue(provider),body={execution:inputValue(execution),provider:p,catalogKey:inputValue(binding)||null,displayName:coze?cozeName(selected):inputValue(name),modelId:coze?selected.model_id:inputValue(model),baseUrl:coze?null:catalog.byokProviders.find(x=>x.id===p).baseUrl,enabled:false,capabilities:['text'],maxOutputTokens:number(tokens),timeoutMs:number(timeout),pointsPerCall:number(price)};
-    if(!coze&&inputValue(key))body.apiKey=inputValue(key);if(!coze&&remove.checked)body.removeKey=true;if(m)body.expectedRevision=m.revision;
+    const p=inputValue(provider),body={execution:inputValue(execution),provider:p,catalogKey:inputValue(binding)||null,displayName:coze?cozeName(selected):inputValue(name),modelId:coze?selected.model_id:inputValue(model),baseUrl:coze?null:modelProviders.find(x=>x.id===p).baseUrl,enabled:false,capabilities:['text'],maxOutputTokens:number(tokens),timeoutMs:number(timeout),pointsPerCall:number(price)};
+    if(!coze&&!usesEnvironmentKey()&&inputValue(key))body.apiKey=inputValue(key);if(!coze&&!usesEnvironmentKey()&&remove.checked)body.removeKey=true;if(m)body.expectedRevision=m.revision;
     try{await mutation('/v1/admin/models'+(m?'/'+m.id:''),body,m?'PATCH':'POST',operationKey);key.input.value='';notify('模型已保存；测试通过并启用后可供用户调用。');await show('models');}
     finally{key.input.value='';delete body.apiKey;}
   });
-  binding.input.addEventListener('change',selection);cozeModel.input.addEventListener('change',selectedModel);execution.input.addEventListener('change',()=>modeChanged(true));
+  binding.input.addEventListener('change',selection);provider.input.addEventListener('change',()=>modeChanged(true));cozeModel.input.addEventListener('change',selectedModel);execution.input.addEventListener('change',()=>modeChanged(true));
   box.addEventListener('close',()=>{closed=true;key.input.value='';available=[];});modeChanged();
 }
 function testModel(m){dialog('发送小额测试调用',[el('p',{},`将${m.execution==='coze'?'通过 Coze 内置集成':'向 '+m.provider+' 官方 API'}调用 ${m.displayName}（${m.modelId}），发送固定测试文字。${m.execution==='coze'?'会消耗 Coze 模型资源':'供应商可能收取少量费用'}，不扣普通用户点数。`)],'发送一次测试',async operationKey=>{const r=await mutation(`/v1/admin/models/${m.id}/test`,{expectedRevision:m.revision},'POST',operationKey);notify(r.status==='passed'?`测试通过，用时${r.latencyMs}ms。请确认后在列表启用。`:`测试${r.status==='uncertain'?'结果待核对':'未通过'}：${r.errorCode||'未知原因'}`,r.status!=='passed');await show('models');});}

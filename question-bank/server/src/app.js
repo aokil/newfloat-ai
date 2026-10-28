@@ -17,6 +17,7 @@ import { registerPaymentRoutes } from './payment-routes.js';
 import { registerSessionEvents } from './session-events.js';
 import { communityRoutes } from './community-routes.js';
 import {registerAndroidReleaseCampaign} from './android-release-campaign.js';
+import {environmentModelKeyFingerprint} from './models.js';
 const UPLOAD_LIMIT = 10 * 1024 * 1024;
 const missing = () => { throw new ApiError(404, 'NOT_FOUND', '未找到可访问的记录'); };
 const conflict = message => { throw new ApiError(409, 'VERSION_CONFLICT', message); };
@@ -60,12 +61,13 @@ function indexedQuestions(payload) {
     });
     return { questions, typeCounts: { ...counts } };
 }
-export async function buildApp({ database = ':memory:', store: providedStore = null, logger = false, rateLimits = true, smsTransport = null, smsHmacKey = null, smsLimits = true, phoneVerifier = null, testHooks = {}, modelMasterKey = null, modelTransport, aiTransport, cozeBridge = null, paymentTransport = null, appUpdateDirectory = null, trustProxy = ['127.0.0.1', '::1'], bootstrapAdminPhone = null, androidReleaseCampaign = null } = {}) {
+export async function buildApp({ database = ':memory:', store: providedStore = null, logger = false, rateLimits = true, smsTransport = null, smsHmacKey = null, smsLimits = true, phoneVerifier = null, testHooks = {}, modelMasterKey = null, baichuanApiKey = null, modelTransport, aiTransport, cozeBridge = null, paymentTransport = null, appUpdateDirectory = null, trustProxy = ['127.0.0.1', '::1'], bootstrapAdminPhone = null, androidReleaseCampaign = null } = {}) {
     const store = providedStore || await AsyncSqliteStore.open(database);
     if (bootstrapAdminPhone !== null) bootstrapAdminPhone = phoneNumber(bootstrapAdminPhone);
     // Runtime readiness is shared with catalog/account checks; no credentials or
     // execution configuration are copied into the account database.
     Object.defineProperty(store, 'cozeBridgeReady', { value: () => cozeBridge?.ready === true && ['metadata', 'test', 'search'].every(method => typeof cozeBridge[method] === 'function') });
+    Object.defineProperty(store, 'environmentModelKeyFingerprint', { value: provider => provider === 'baichuan' ? environmentModelKeyFingerprint(baichuanApiKey) : null });
     async function recoverModelTests() {
         await store.transaction(async () => {
           for (const pending of await store.all("SELECT id,model_id,actor_id FROM model_tests WHERE status='pending' AND created_at<?", Date.now() - 90000)) {
@@ -762,9 +764,9 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
             return { releaseId: release.id, status: 'withdrawn' };
         });
     });
-    adminRoutes(app, { store, auth, admin, idem, integer, modelMasterKey, modelTransport, cozeBridge });
+    adminRoutes(app, { store, auth, admin, idem, integer, modelMasterKey, baichuanApiKey, modelTransport, cozeBridge });
     communityRoutes(app,{store,auth,admin,idem,integer});
-    await aiRoutes(app, { store, auth, modelMasterKey, aiTransport, cozeBridge, rateLimits });
+    await aiRoutes(app, { store, auth, modelMasterKey, baichuanApiKey, aiTransport, cozeBridge, rateLimits });
     await registerPaymentRoutes(app, { store, auth, payment: paymentTransport });
     registerAppUpdateRoutes(app, { directory: appUpdateDirectory });
     await app.register(staticFiles, { root: fileURLToPath(new URL('../public/', import.meta.url)), prefix: '/', index: ['index.html'], dotfiles: 'deny' });

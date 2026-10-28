@@ -11,6 +11,8 @@
 - 1 点：`doubao-mini`、`doubao-lite`、`qwen-plus`、`minimax-2-5`、`minimax-2-7`、`glm-4-7`。
 - 2 点：`doubao-pro`（显示豆包 2.1 Pro）、`glm-5`、`glm-turbo`。
 
+2026-10-28 百川医学接入（仅源码）：新增 `baichuan-m2`（百川 M2）1 点、`baichuan-m3`（百川 M3）2 点；两者均为服务端官方 API 内置模型，固定生成 2048／思考 1024，只给答案，仍在完整答案及成功回执后展示。Key 仅取服务端 `BAICHUAN_API_KEY`，不接受客户端 Key、不提供百川自带 Key 入口。两型号强制 `supportsImages=false`；App 图片开关开启时保持其状态，在请求百川前提示阻止，关闭后可沿原 OCR 文字方式调用。实际图片请求在服务端预占前拒绝。
+
 ## GET /v1/models/catalog
 
 需登录。响应：
@@ -24,7 +26,7 @@
 }
 ```
 
-`items` 固定返回上述 9 个产品 key。`configured` 表示管理员明确绑定了真实配置；`available` 还要求启用、真实测试通过、密钥可用、点数足够。没有配置的条目不得假装已可用。`unavailableReason` 可为 `MODEL_NOT_CONFIGURED`、`MODEL_CONFIG_MISMATCH`、`MODEL_KEY_NOT_CONFIGURED`、`MODEL_NOT_VERIFIED`、`MODEL_DISABLED`、`INSUFFICIENT_POINTS`。
+`items` 固定返回上述 11 个产品 key。`configured` 表示管理员明确绑定了真实配置；`available` 还要求启用、真实测试通过、密钥可用、点数足够。没有配置的条目不得假装已可用。`unavailableReason` 可为 `MODEL_NOT_CONFIGURED`、`MODEL_CONFIG_MISMATCH`、`MODEL_KEY_NOT_CONFIGURED`、`MODEL_NOT_VERIFIED`、`MODEL_DISABLED`、`INSUFFICIENT_POINTS`。
 
 管理员现有模型 POST/PATCH 新增可选 `catalogKey`，绑定后 `pointsPerCall` 固定按产品档位。真实供应商 `modelId` 由管理员输入并测试，不从显示名推断。旧未绑定模型仍可管理/测试，但不混入固定目录。
 
@@ -62,7 +64,7 @@
 
 相同键的已完成请求返回原答案与当前余额，不再次调用/扣费；进行中返回 409 `AI_REQUEST_PENDING`，客户端稍后以相同键和请求重试。失败请求同键重试重放失败，不自动重发给供应商；用户显式重新尝试应生成新键。相同键换题/模型/Key 为 409 `IDEMPOTENCY_CONFLICT`。
 
-2026-10-04 精简答案源码规则（待构建/部署）：模型生成仅要求 `answer` 字段；接口继续提供空字符串 `explanation` 兼容旧客户端。选择仅返回当前选项字母，多选以顿号分隔，判断仅返回“对/错”，填空/简答返回最短必要答案；格式无效或无答案走失败释放预占。客户端可在 `question` 首行加入已识别的 `题型：…`，其余仅为清理后的题干与选项；幂等摘要仍按完整原请求计算。HTTP 提供商按题型采用不超过原配置的 128／512 输出预算；Coze 通过提示词要求精简，SDK 的既有回执用量检查不等于供应商生成硬限额。实际 token 节省未测量。
+2026-10-04 精简答案源码规则（待构建/部署）：模型生成仅要求 `answer` 字段；接口继续提供空字符串 `explanation` 兼容旧客户端。选择仅返回当前选项字母，多选以顿号分隔，判断仅返回“对/错”，填空/简答返回最短必要答案；格式无效或无答案走失败释放预占。客户端可在 `question` 首行加入已识别的 `题型：…`，其余仅为清理后的题干与选项；幂等摘要仍按完整原请求计算。HTTP 提供商按题型采用不超过原配置的 128／512 输出预算（百川 M2/M3 使用已确认的生成2048／思考1024专用预算）；Coze 通过提示词要求精简，SDK 的既有回执用量检查不等于供应商生成硬限额。实际 token 节省未测量。
 
 客户端断连或切页不会自动取消已发给供应商的请求：若取得有效答案，答案回执和扣点原子提交，稍后可取回；没有有效答案则释放预占。客户端不得因为没有收到响应就用新幂等键自动重发。每次预占截止为供应商超时加 15 秒；启动及每 15 秒恢复过期项，进程崩溃不会留下永久预占。
 
@@ -111,3 +113,7 @@
 Coze 端使用 `LLMClient.stream()` 聚合完整输出，保留真实 token 用量；`invoke()` 只返回内容，无法满足账本用量核验。答案为固定 `answer/explanation` JSON；无真实用量、明确非 stop 结束、无效结果和超预算均失败，后端释放预占，不扣平台点数。不返回 SDK 原始错误或凭据。
 
 SDK 0.7.32 没有公开 `AbortSignal` 或供应商输出 token 上限参数：`maxOutputTokens` 是返回结果验收预算，不能硬限制平台生成；超时只停止交付，平台仍可能继续生成或内部重试并消耗资源。应用不自动重新发送。超时后台流保留并发占位，进程最多 4 个生成；模型目录最多 1 个读取任务、缓存 60 秒，目录读取期限 20 秒。平台资源费用与产品 1／2 点账本是两套规则，不能把平台费用承诺为固定金额。
+
+## AI 提取题目补充
+
+2026-10-28 仅源码新增：`GET /v1/models/catalog` 的 `ocrExtraction` 标示固定豆包Mini/1点提取服务能力；`POST /v1/ai/extract` 仅接收当前框选image并复用原幂等及账本。完成回执source为ai-ocr，原文/题干/选项与真实usage通过后扣1点，失败释放；`/v1/ai/receipt` 可只读恢复，不重新上传图片。之后本地查询免费，AI解题回退按原模型另计。具体见 [AI提取契约](ai-ocr-extraction-v1.md)。

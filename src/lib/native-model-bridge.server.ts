@@ -3,7 +3,7 @@ import { validateAiImage } from '../../question-bank/server/src/ai-image.js';
 import type { AiImagePayload } from '../../question-bank/server/src/ai-image.js';
 import { cozeModelFailureCode, cozeProjectModelCompletion, cozeProjectModelMetadata,
   cozeProjectModelsReady } from './coze-llm.server';
-import type { CozeModelExecutionContext, CozeModelMetadata, CozeSearchResult, CozeTestResult } from './coze-llm.server';
+import type { CozeModelExecutionContext, CozeModelMetadata, CozeSearchResult, CozeTestResult, CozeExtractionResult } from './coze-llm.server';
 
 type ModelConfiguration = { modelId: string; timeoutMs: number; maxOutputTokens: number };
 type CallContext = CozeModelExecutionContext & { requestId: string; image?: AiImagePayload };
@@ -12,6 +12,7 @@ export type NativeModelBridge = {
   metadata(): Promise<CozeModelMetadata>;
   test(model: unknown, context: unknown): Promise<CozeTestResult>;
   search(model: unknown, question: unknown, context: unknown): Promise<CozeSearchResult>;
+  extract(model: unknown, image: unknown, context: unknown): Promise<CozeExtractionResult>;
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -59,7 +60,8 @@ function safeFailure(error: unknown): Error {
 
 /** Direct SDK adapter for Fastify in this Coze process; no localhost server, HMAC or extra billing. */
 export function nativeModelBridge(): NativeModelBridge {
-  async function execute(mode: 'search' | 'test', model: unknown, question: unknown, context: unknown) {
+  async function execute(mode: 'search' | 'test' | 'extract', model: unknown, question: unknown, context: unknown) {
+    if(mode==='extract'&&(!record(model)||model.provider!=='doubao'||model.catalogKey!=='doubao-mini'))throw new Error('INVALID_PROVIDER_RESPONSE');
     const config = configuration(model);
     const call = callContext(context);
     if (mode === 'search' && (typeof question !== 'string' || !question.trim() || question.length > 16_000)) {
@@ -67,7 +69,7 @@ export function nativeModelBridge(): NativeModelBridge {
     }
     try {
       return (await cozeProjectModelCompletion({ requestId: call.requestId, mode, modelId: config.modelId,
-        ...(mode === 'search' ? { question, ...(call.image ? {image:call.image} : {}) } : {}), timeoutMs: Math.min(config.timeoutMs, 25_000),
+        ...(mode === 'search' ? { question } : {}), ...(mode!=='test'&&call.image?{image:call.image}:{}), timeoutMs: Math.min(config.timeoutMs, 25_000),
         maxOutputTokens: config.maxOutputTokens }, call)).result;
     } catch (error: unknown) {
       throw safeFailure(error);
@@ -90,6 +92,12 @@ export function nativeModelBridge(): NativeModelBridge {
     async search(model: unknown, question: unknown, context: unknown) {
       const result = await execute('search', model, question, context);
       if (!('answer' in result)) throw new Error('INVALID_ANSWER');
+      return result;
+    },
+    async extract(model: unknown,image: unknown,context: unknown) {
+      if(!record(context))throw new Error('INVALID_PROVIDER_RESPONSE');
+      const result=await execute('extract',model,undefined,{...context,image});
+      if(!('rawText' in result))throw new Error('OCR_RESPONSE_INVALID');
       return result;
     },
   });

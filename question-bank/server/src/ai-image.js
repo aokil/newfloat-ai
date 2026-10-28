@@ -8,6 +8,7 @@ const DOCUMENTED_IMAGE_MODELS=new Set([
   'qwen-3-5-plus-260215','qwen3.5-plus','qwen3.5-plus-2026-02-15'
 ]);
 export function modelSupportsImages(modelId,inputTypes){
+  if(['Baichuan-M2','Baichuan-M3'].includes(modelId))return false;
   if(Array.isArray(inputTypes))return inputTypes.some(value=>typeof value==='string'&&['image','image_url'].includes(value.toLowerCase()));
   return DOCUMENTED_IMAGE_MODELS.has(modelId);
 }

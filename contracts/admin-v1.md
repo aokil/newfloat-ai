@@ -77,6 +77,8 @@ reason=trial/sponsor/free_expired/sponsor_expired/disabled。aiAllowed还需足�
 
 ## 模型配置与真实测试
 
+2026-10-28 百川医学接入（仅源码）：管理员模型提供商元数据增加 `baichuan`，固定官方源 `https://api.baichuan-ai.com/v1`，仅绑定 `baichuan-m2`/`Baichuan-M2`（1点）和 `baichuan-m3`/`Baichuan-M3`（2点）。接入方式为 official，Key 唯一来源是当前 Coze 服务端环境的 `BAICHUAN_API_KEY`，保存接口拒绝 apiKey/removeKey，数据库 encrypted_key 保持空；管理员视图仅给出 `credentialSource=environment`、是否已配置及已有脱敏指纹。生成/思考预算固定2048/1024，测试也须保留有效思考预算。保存草稿不代表可用，须通过真实测试后明确启用；测试成功只持久化该服务端密钥的SHA-256指纹，环境密钥变更后旧测试不能继续授权。普通用户目录不返回百川密钥或新增百川自带Key入口，管理员目录额外返回modelProviders用于配置表单。
+
 GET/POST /v1/admin/models、PATCH /v1/admin/models/:id（expectedRevision）管理配置。字段provider(deepseek/doubao)、displayName、modelId、baseUrl、apiKey（只写）、enabled、capabilities、maxOutputTokens、timeoutMs、dailyRequestLimit、pointsPerCall、revision、keyConfigured/keyFingerprint、lastTestAt/lastTestStatus/lastTestErrorCode。Key空白表示保留，明确removeKey=true才清除；返回永不含明文Key。
 
 Key用独立环境主密钥AES-GCM加密，缺主密钥拒绝保存；主密钥不与数据库一同公开，备份/轮换分开处理。网页只本次表单内存，提交后清空。日志、API列表、静态文件和APK不能含密钥。

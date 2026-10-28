@@ -1,12 +1,12 @@
 import {ApiError,fields,text,id,sha256,authenticate} from './security.js';
 import {userInfo,points} from './account.js';
-import {modelConfig,modelView,sealKey,openKey,officialModelTest,providerFailureCode} from './models.js';
+import {modelConfig,modelView,sealKey,modelSecret,environmentModelKeyFingerprint,officialModelTest,providerFailureCode} from './models.js';
 const missing=()=>{throw new ApiError(404,'NOT_FOUND','记录不存在');};
 const conflict=()=>{throw new ApiError(409,'VERSION_CONFLICT','记录已变化，请刷新后重试');};
 function timestamp(value){if(value===null||value===undefined)return null;const n=Date.parse(value);if(typeof value!=='string'||!Number.isFinite(n))throw new ApiError(400,'INVALID_REQUEST','日期须为ISO时间或null');return n;}
 // Accept the obsolete dailyRequestLimit field from cached admin pages, but ignore it.
 const modelFields=['execution','provider','displayName','modelId','baseUrl','apiKey','removeKey','enabled','capabilities','maxOutputTokens','timeoutMs','dailyRequestLimit','pointsPerCall','catalogKey','expectedRevision'];
-export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,modelTransport=officialModelTest,cozeBridge=null}){
+export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,baichuanApiKey=null,modelTransport=officialModelTest,cozeBridge=null}){
   const sqlPage=async(req,sql,args=[])=>{const limit=integer(req.query.limit,50,1,200),offset=integer(req.query.cursor,0,0,100000000);const rows=await store.all(sql+' LIMIT ? OFFSET ?',...args,limit+1,offset);return {items:rows.slice(0,limit),nextCursor:rows.length>limit?String(offset+limit):null};};
   app.get('/v1/admin/users',{preHandler:admin},async req=>{
     const where=[],args=[];
@@ -45,7 +45,7 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,mo
   app.get('/v1/admin/audit',{preHandler:admin},async req=>await sqlPage(req,'SELECT id,actor_id AS actorId,action,target_id AS targetId,details,created_at AS createdAt FROM audit ORDER BY id DESC'));
   app.get('/v1/admin/releases',{preHandler:admin},async req=>await sqlPage(req,'SELECT id AS releaseId,public_bank_id AS bankId,data_version AS dataVersion,release_sequence AS releaseSequence,title,state,source_bank_id AS sourceBankId,source_version AS sourceDataVersion FROM releases ORDER BY release_sequence DESC'));
   const model=async req=>{const row=await store.get('SELECT * FROM models WHERE id=?',req.params.id);if(!row)missing();return row;};
-  const viewModel=row=>({...modelView(row),bridgeReady:store.cozeBridgeReady?.()===true});
+  const viewModel=row=>({...modelView(row,baichuanApiKey),bridgeReady:store.cozeBridgeReady?.()===true});
   app.get('/v1/admin/models',{preHandler:admin},async req=>{const page=await sqlPage(req,'SELECT * FROM models ORDER BY created_at DESC,id');page.items=page.items.map(viewModel);return page;});
   async function cozeMetadata(){
     if(!store.cozeBridgeReady?.())throw new ApiError(503,'COZE_INTEGRATION_NOT_READY','Coze 模型集成尚未配置，请联系管理员');
@@ -89,7 +89,8 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,mo
       modelConfig(config,previousConfig);
     }
     if(config.catalogKey&&(await store.all('SELECT id,config FROM models WHERE id<>?',old?.id??'')).some(row=>JSON.parse(row.config).catalogKey===config.catalogKey))throw new ApiError(409,'VERSION_CONFLICT','该目录型号已绑定另一模型配置');
-    if(config.execution==='coze'){encrypted=null;fingerprint=null;}
+    if(config.provider==='baichuan'){encrypted=null;fingerprint=old?.key_fingerprint??null;}
+    else if(config.execution==='coze'){encrypted=null;fingerprint=null;}
     else{
       if(req.body.removeKey===true){encrypted=null;fingerprint=null;config.enabled=false;}
       if(req.body.apiKey!==undefined&&(typeof req.body.apiKey!=='string'||/[\r\n]/u.test(req.body.apiKey)))throw new ApiError(400,'INVALID_REQUEST','API Key须为不含换行的文本');
@@ -98,12 +99,13 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,mo
     const oldConfig=old?JSON.parse(old.config):null;
     const changed=!old||fingerprint!==old.key_fingerprint||(oldConfig.execution??'official')!==config.execution||
       ['provider','baseUrl','modelId','catalogKey','capabilities','maxOutputTokens'].some(k=>JSON.stringify(config[k])!==JSON.stringify(oldConfig[k]));
-    const ready=config.execution==='coze'?store.cozeBridgeReady?.()===true:!!encrypted;
+    const environmentFingerprint=environmentModelKeyFingerprint(baichuanApiKey);
+    const ready=config.provider==='baichuan'?!!environmentFingerprint&&fingerprint===environmentFingerprint:config.execution==='coze'?store.cozeBridgeReady?.()===true:!!encrypted;
     if(config.enabled&&(!ready||changed||old?.last_test_status!=='passed'))throw new ApiError(422,'VALIDATION_FAILED','启用前必须通过对应配置的真实测试');
     const modelId=old?.id||id('model'),revision=(old?.revision||0)+1;
     if(old)await store.run('UPDATE models SET config=?,encrypted_key=?,key_fingerprint=?,revision=?,last_test_at=?,last_test_status=?,last_test_error=?,last_test_result=? WHERE id=?',JSON.stringify(config),encrypted,fingerprint,revision,changed?null:old.last_test_at,changed?null:old.last_test_status,changed?null:old.last_test_error,changed?null:old.last_test_result,modelId);
     else await store.run('INSERT INTO models(id,config,encrypted_key,key_fingerprint,revision,created_at) VALUES(?,?,?,?,?,?)',modelId,JSON.stringify(config),encrypted,fingerprint,revision,Date.now());
-    await store.audit(req.auth.user_id,'model-config',modelId,{revision,keyConfigured:!!encrypted});return viewModel(await store.get('SELECT * FROM models WHERE id=?',modelId));
+    await store.audit(req.auth.user_id,'model-config',modelId,{revision,keyConfigured:config.provider==='baichuan'?!!environmentFingerprint:!!encrypted});return viewModel(await store.get('SELECT * FROM models WHERE id=?',modelId));
   }
   async function saveModelRequest(req,updating){
     fields(req.body,modelFields);
@@ -140,8 +142,10 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,mo
       const config=JSON.parse(row.config);
       if(config.execution==='coze'){
         if(!store.cozeBridgeReady?.())throw new ApiError(503,'COZE_INTEGRATION_NOT_READY','Coze 模型集成尚未配置，请联系管理员');
+      }else if(config.provider==='baichuan'){
+        if(!environmentModelKeyFingerprint(baichuanApiKey))throw new ApiError(422,'VALIDATION_FAILED','请先在服务端配置 BAICHUAN_API_KEY 环境密钥');
       }else if(!row.encrypted_key)throw new ApiError(422,'VALIDATION_FAILED','API Key未配置');
-      const secret=config.execution==='coze'?null:openKey(row.encrypted_key,modelMasterKey),testId=id('test');
+      const secret=modelSecret(config,row,modelMasterKey,baichuanApiKey),testId=id('test');
       await store.run('INSERT INTO model_tests(id,model_id,actor_id,idempotency_key,request_hash,status,created_at) VALUES(?,?,?,?,?,?,?)',testId,row.id,req.auth.user_id,key,digest,'pending',Date.now());
       await store.run("UPDATE models SET last_test_at=?,last_test_status='pending',last_test_error=NULL,last_test_result=? WHERE id=?",Date.now(),JSON.stringify({testId,status:'pending'}),row.id);
       return {row,config,secret,testId};
@@ -163,7 +167,10 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,mo
       // Always persist the billing-attempt receipt, but never bless a changed or newly forbidden configuration.
       const fresh=await store.get('SELECT * FROM models WHERE id=?',row.id);let authorized=true;try{const s=await authenticate(store,req);authorized=s.role==='admin';}catch{authorized=false;}
       const latest=fresh&&JSON.parse(fresh.last_test_result||'{}').testId===testId;
-      if(fresh?.revision===row.revision&&authorized&&latest)await store.run('UPDATE models SET last_test_at=?,last_test_status=?,last_test_error=?,last_test_result=? WHERE id=?',Date.now(),result.status,result.errorCode??null,JSON.stringify(result),row.id);
+      if(fresh?.revision===row.revision&&authorized&&latest){
+        if(config.provider==='baichuan')await store.run('UPDATE models SET last_test_at=?,last_test_status=?,last_test_error=?,last_test_result=?,key_fingerprint=? WHERE id=?',Date.now(),result.status,result.errorCode??null,JSON.stringify(result),result.status==='passed'?sha256(secret):fresh.key_fingerprint,row.id);
+        else await store.run('UPDATE models SET last_test_at=?,last_test_status=?,last_test_error=?,last_test_result=? WHERE id=?',Date.now(),result.status,result.errorCode??null,JSON.stringify(result),row.id);
+      }
       await store.audit(req.auth.user_id,'model-test',row.id,{testId,status:result.status,errorCode:result.errorCode??null});return result;
     });
   });

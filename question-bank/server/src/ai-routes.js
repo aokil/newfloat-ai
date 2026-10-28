@@ -1,11 +1,14 @@
 import {ApiError,authenticate,fields,id,sha256,text} from './security.js';
 import {points,requirePositivePoints} from './account.js';
-import {BYOK_PROVIDERS,byokConfiguration,officialModelSearch,openKey} from './models.js';
+import {BYOK_PROVIDERS,MODEL_PROVIDERS,byokConfiguration,officialModelSearch,officialModelExtract,modelSecret} from './models.js';
+import {validateExtractedQuestion,isDoubaoMiniModelId} from './ocr-extraction.js';
 import {MODEL_CATALOG,catalogEntry,configuredCatalog,modelUnavailableReason} from './model-catalog.js';
 import {minimalAnswer} from './answer-only.js';
 import {validateAiImage,aiImageDigest,modelSupportsImages} from './ai-image.js';
 
 const ERROR_MESSAGES={
+  OCR_INCOMPLETE:'未能完整提取题目，请调整截图区域后重试，本次未扣平台点数',
+  OCR_RESPONSE_INVALID:'题目提取结果无效，请重试，本次未扣平台点数',
   MODEL_REQUEST_INVALID:'模型请求格式不兼容，请更新配套后台后重试，本次未扣平台点数',
   MODEL_IMAGE_UNSUPPORTED:'当前模型不支持图片识别，无法直接发送图片',
   PROVIDER_AUTH_FAILED:'模型 API Key 无效，请检查配置',MODEL_FORBIDDEN:'当前 Key 没有该模型权限',
@@ -21,11 +24,11 @@ const ERROR_MESSAGES={
   PROJECT_IDENTITY_UNAVAILABLE:'Coze 项目身份当前不可用，本次未扣平台点数'
 };
 const masterConfigured=value=>{try{return Buffer.from(value||'','base64').length===32;}catch{return false;}};
-function keyUsable(binding,master){
+function keyUsable(binding,master,baichuanApiKey){
   if(!binding)return false;
   if(binding.config.execution==='coze')return binding.bridgeReady===true;
-  if(!masterConfigured(master))return false;
-  try{const key=openKey(binding.row.encrypted_key,master);return typeof key==='string'&&key.length>=8&&!/[\r\n]/u.test(key);}catch{return false;}
+  if(binding.config.provider!=='baichuan'&&!masterConfigured(master))return false;
+  try{const key=modelSecret(binding.config,binding.row,master,baichuanApiKey);return typeof key==='string'&&key.length>=8&&!/[\r\n]/u.test(key);}catch{return false;}
 }
 function providerError(error){
   if(error instanceof ApiError)return error;
@@ -61,7 +64,7 @@ function validateReceipt(result,question){
   return {answer:minimalAnswer(result.answer,question),explanation:'',usage:{prompt_tokens:result.usage.prompt_tokens,completion_tokens:result.usage.completion_tokens,total_tokens:result.usage.total_tokens}};
 }
 
-export async function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=officialModelSearch,cozeBridge=null,rateLimits=true}){
+export async function aiRoutes(app,{store,auth,modelMasterKey,baichuanApiKey=null,aiTransport=officialModelSearch,extractionTransport=officialModelExtract,cozeBridge=null,rateLimits=true}){
   await recoverExpired(store);
   let recoveryTask=null;
   const recovery=setInterval(()=>{
@@ -80,11 +83,16 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=offici
       const binding=bindings.get(item.key);
       const imageModel=imageModels?.find(model=>model.model_id===binding?.config.modelId);
       const supportsImages=!!binding&&(binding.config.execution!=='coze'||!!imageModel)&&modelSupportsImages(binding.config.modelId,imageModel?.input_types);
-      const reason=modelUnavailableReason(item,binding)||(!keyUsable(binding,modelMasterKey)?'MODEL_KEY_NOT_CONFIGURED':null)||(available<item.pointsPerCall?'INSUFFICIENT_POINTS':null);
+      const reason=modelUnavailableReason(item,binding)||(!keyUsable(binding,modelMasterKey,baichuanApiKey)?'MODEL_KEY_NOT_CONFIGURED':null)||(available<item.pointsPerCall?'INSUFFICIENT_POINTS':null);
       return {...item,name:binding?.config.execution==='coze'?binding.config.displayName:item.name,configured:!!binding,available:!reason,unavailableReason:reason,
         supportsImages,capabilities:supportsImages?['text','image']:['text']};
     });
-    return {items,byokProviders:BYOK_PROVIDERS,pointsAvailable:available,policy:{basicRequiresPositivePoints:true,basicPointsPerUse:0,byokPointsPerCall:0}};
+    const mini=items.find(item=>item.key==='doubao-mini'),miniBinding=bindings.get('doubao-mini');
+    const extractionReady=mini?.available===true&&mini.supportsImages===true&&isDoubaoMiniModelId(miniBinding?.config.modelId)&&
+      (miniBinding?.config.execution!=='coze'||typeof cozeBridge?.extract==='function');
+    return {items,byokProviders:BYOK_PROVIDERS,...(req.auth.role==='admin'?{modelProviders:MODEL_PROVIDERS}:{}),
+      ocrExtraction:{modelKey:'doubao-mini',pointsPerCall:1,available:extractionReady},
+      pointsAvailable:available,policy:{basicRequiresPositivePoints:true,basicPointsPerUse:0,byokPointsPerCall:0}};
   });
 
   // Read a durable receipt after a disconnected response or a client restart.
@@ -97,20 +105,21 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=offici
     return await previousResult(store,row,row.request_hash);
   });
 
-  app.post('/v1/ai/search',{preHandler:auth,config:{rateLimit:rateLimits?{max:20,timeWindow:'1 minute'}:false}},async req=>{
+  async function execute(req,extraction=false){
     let personal=null,config,secret,model,request;
     try{
-      fields(req.body,['mode','modelKey','question','byok','image']);
-      const question=text(req.body.question,'question',1,16000).trim(),mode=req.body.mode;
+      fields(req.body,extraction?['image']:['mode','modelKey','question','byok','image']);
+      const question=extraction?'请忠实提取图片中的完整题目。':text(req.body.question,'question',1,16000).trim(),mode=extraction?'builtin':req.body.mode;
       const image=req.body.image===undefined?null:validateAiImage(req.body.image);
+      if(extraction&&!image)throw new ApiError(400,'INVALID_REQUEST','AI 提取题目需要当前截图');
       if(!['builtin','byok'].includes(mode))throw new ApiError(400,'INVALID_REQUEST','请选择内置模型或自带Key');
       if(mode==='builtin'&&req.body.byok!==undefined||mode==='byok'&&req.body.modelKey!==undefined)throw new ApiError(400,'INVALID_REQUEST','模型配置不能混用');
       const keyHash=sha256(text(req.headers['idempotency-key'],'Idempotency-Key',1,128));
       personal=mode==='byok'?byokConfiguration(req.body.byok):null;
-      const product=mode==='builtin'?catalogEntry(text(req.body.modelKey,'modelKey',1,64)):null;
+      const product=mode==='builtin'?catalogEntry(extraction?'doubao-mini':text(req.body.modelKey,'modelKey',1,64)):null;
       if(mode==='builtin'&&!product)throw new ApiError(400,'INVALID_REQUEST','请选择目录中的模型');
       // Persist a request digest, never the request body or API Key.
-      const digest=sha256(JSON.stringify({mode,modelKey:product?.key??null,question,
+      const digest=sha256(JSON.stringify({...(extraction?{purpose:'ocr-extraction-v1'}:{}),mode,modelKey:product?.key??null,question,
         ...(image?{image:{mimeType:image.mimeType,sha256:aiImageDigest(image)}}:{}),
         byok:personal?{provider:personal.provider,baseUrl:personal.baseUrl,modelId:personal.modelId,keyHash:sha256(personal.apiKey)}:null}));
       let imageModels=null;
@@ -125,16 +134,20 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=offici
         let row=null,cost=0;
         if(mode==='builtin'){
           const binding=(await configuredCatalog(store)).get(product.key),reason=modelUnavailableReason(product,binding);
-          if(reason||!keyUsable(binding,modelMasterKey))throw new ApiError(503,'MODEL_UNAVAILABLE','该内置模型尚未配置、验证或启用，请选择其他模型');
+          if(reason||!keyUsable(binding,modelMasterKey,baichuanApiKey))throw new ApiError(503,'MODEL_UNAVAILABLE','该内置模型尚未配置、验证或启用，请选择其他模型');
           row=binding.row;config=binding.config;cost=product.pointsPerCall;
+          if(extraction){
+            if(product.key!=='doubao-mini'||config.provider!=='doubao'||cost!==1||!isDoubaoMiniModelId(config.modelId))throw new ApiError(503,'MODEL_UNAVAILABLE','豆包 Mini 提取服务配置不匹配');
+            if(config.execution==='coze'&&typeof cozeBridge?.extract!=='function')throw new ApiError(503,'COZE_INTEGRATION_NOT_READY','题目提取服务尚未就绪，本次未扣点');
+            config={...config,maxOutputTokens:4096};
+          }
           const imageModel=imageModels?.find(model=>model.model_id===config.modelId);
           if(image&&((config.execution==='coze'&&!imageModel)||!modelSupportsImages(config.modelId,imageModel?.input_types)))
             throw new ApiError(422,'MODEL_IMAGE_UNSUPPORTED','当前模型不支持图片识别，无法直接发送图片');
           if(user.points_balance-user.points_reserved<cost)throw new ApiError(402,'INSUFFICIENT_POINTS',`该模型每次需要${cost}点，可用点数不足`);
           // Paid searches are governed by the points ledger, not a daily counter.
           // Legacy dailyRequestLimit values remain stored but are no longer enforced.
-          if(config.execution==='coze')secret=null;
-          else try{secret=openKey(row.encrypted_key,modelMasterKey);}catch{throw new ApiError(503,'MODEL_UNAVAILABLE','该模型密钥当前不可用，请联系管理员');}
+          try{secret=modelSecret(config,row,modelMasterKey,baichuanApiKey);}catch{throw new ApiError(503,'MODEL_UNAVAILABLE','该模型密钥当前不可用，请联系管理员');}
           model={key:product.key,name:config.execution==='coze'?config.displayName:product.name,provider:product.provider,mode};
         }else{
           const {apiKey,...publicConfig}=personal;secret=apiKey;config=publicConfig;
@@ -149,8 +162,11 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=offici
       });
       if(begin.replay)return begin.replay;
       request=begin.request;
-      const receipt=validateReceipt(await (config.execution==='coze'?cozeBridge.search(config,question,{requestId:request.id,...(image?{image}:{})}):aiTransport(config,secret,question,image)),question);
-      if(typeof secret==='string'&&secret&&(receipt.answer.includes(secret)||receipt.explanation.includes(secret)))throw new Error('INVALID_PROVIDER_RESPONSE');
+      const result=await (extraction?(config.execution==='coze'?cozeBridge.extract(config,image,{requestId:request.id}):extractionTransport(config,secret,image)):
+        config.execution==='coze'?cozeBridge.search(config,question,{requestId:request.id,...(image?{image}:{})}):aiTransport(config,secret,question,image));
+      const receipt=extraction?{...validateExtractedQuestion(result),usage:result.usage}:validateReceipt(result,question);
+      if(extraction&&(!receipt.usage||!['prompt_tokens','completion_tokens','total_tokens'].every(k=>Number.isSafeInteger(receipt.usage[k])&&receipt.usage[k]>=0)))throw new Error('USAGE_MISSING');
+      if(typeof secret==='string'&&secret&&JSON.stringify(receipt).includes(secret))throw new Error('INVALID_PROVIDER_RESPONSE');
       return await store.transaction(async()=>{
         const row=await store.get('SELECT * FROM ai_requests WHERE id=?',request.id);
         if(row.status!=='pending')return await previousResult(store,row,digest);
@@ -168,10 +184,10 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=offici
         if(row.points_cost>0){
           await store.run('UPDATE users SET points_reserved=points_reserved-?,revision=revision+1 WHERE id=?',row.points_cost,row.user_id);
           user=await store.get('SELECT * FROM users WHERE id=?',row.user_id);
-          await points(store,user,-row.points_cost,row.user_id,`AI搜题：${model.name}`,`ai-search:${row.id}`);
+          await points(store,user,-row.points_cost,row.user_id,`${extraction?'AI提取题目':'AI搜题'}：${model.name}`,`ai-search:${row.id}`);
         }
         user=await store.get('SELECT * FROM users WHERE id=?',row.user_id);
-        const result={requestId:row.id,status:'completed',source:'ai',model,...receipt,pointsCharged:row.points_cost,pointsAvailable:user.points_balance-user.points_reserved,
+        const result={requestId:row.id,status:'completed',source:extraction?'ai-ocr':'ai',...(extraction?{purpose:'ocr-extraction-v1'}:{}),model,...receipt,pointsCharged:row.points_cost,pointsAvailable:user.points_balance-user.points_reserved,
           ...(image?{inputMode:'image'}:{})};
         await store.run("UPDATE ai_requests SET status='completed',result=?,updated_at=? WHERE id=?",JSON.stringify(result),Date.now(),row.id);
         await store.audit(row.user_id,'ai-search-completed',row.id,{modelKey:row.catalog_key,mode,pointsCharged:row.points_cost});
@@ -187,5 +203,7 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,aiTransport=offici
       if(req.body?.byok&&typeof req.body.byok==='object')req.body.byok.apiKey='';
       if(req.body?.image&&typeof req.body.image==='object')req.body.image.data='';
     }
-  });
+  }
+  app.post('/v1/ai/search',{preHandler:auth,config:{rateLimit:rateLimits?{max:20,timeWindow:'1 minute'}:false}},req=>execute(req));
+  app.post('/v1/ai/extract',{preHandler:auth,config:{rateLimit:rateLimits?{max:20,timeWindow:'1 minute'}:false}},req=>execute(req,true));
 }
