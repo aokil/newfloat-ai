@@ -5,6 +5,7 @@ import {pointUnits,pointValue,pointsResponse} from '../src/point-values.js';
 import {migrateSqlitePointPrecision,migratePostgresPointPrecision} from '../src/point-precision-migration.js';
 import {officialModelSearch,modelConfig} from '../src/models.js';
 import {modelSupportsImages} from '../src/ai-image.js';
+import {PostgresStore} from '../src/postgres-store.js';
 
 const fakeKey='synthetic-environment-key-not-a-real-credential';
 const usage={prompt_tokens:8,completion_tokens:4,total_tokens:12};
@@ -22,12 +23,23 @@ const configuration=([catalogKey,provider,modelId,baseUrl,pointsPerCall])=>({
 const exact=(app,method,url,token,payload,key)=>app.inject({method,url,
   headers:{authorization:'Bearer '+token,'x-float-points-precision':'2',...(key?{'idempotency-key':key}:{})},
   ...(payload===undefined?{}:{payload})});
-async function fixture(t,balance=2,transport=async()=>answer){
+async function fixture(t,balance=2,transport=async()=>answer,postgresParameters=false){
   let supplierCalls=0;
   const app=await testApp({baichuanApiKey:fakeKey,deepseekApiKey:fakeKey,
     modelTransport:async(_config,key)=>{assert.equal(key,fakeKey);return {status:'passed',usage,latencyMs:1};},
     aiTransport:async(config,key,...args)=>{supplierCalls++;assert.equal(key,fakeKey);return transport(config,...args);}});
   t.after(()=>app.close());
+  if(postgresParameters){
+    // Exercise the real production parameter compiler while SQLite executes the
+    // isolated fixture. This is not a real PostgreSQL engine or production DB.
+    for(const method of ['get','all','run']){
+      const original=app.store[method].bind(app.store);
+      app.store[method]=(sql,...params)=>{
+        const statement=PostgresStore.prototype._statement.call(null,sql,params);
+        return original(sql,...statement.values);
+      };
+    }
+  }
   const owner=await register(app,'isolated-fractional-owner'),token=owner.accessToken;
   await app.store.run("UPDATE users SET role='admin',points_balance=?,points_reserved=0 WHERE id=?",balance,owner.principal.userId);
   for(const spec of specs){
@@ -55,8 +67,20 @@ test('hundredth arithmetic and response negotiation never round/truncate stored 
   assert.deepEqual(pointsResponse(precise,true),precise);assert.equal(input.account.pointsAvailable,1.2);
 });
 
-test('five 0.2 charges plus two 0.5 charges settle exactly once and recover at zero',async t=>{
-  const f=await fixture(t);
+test('PostgreSQL parameter compiler accepts exact point decimals and retains integer/range checks',()=>{
+  const compile=(values)=>PostgresStore.prototype._statement.call(null,'SELECT ?,?,?,?',values);
+  const statement=compile([-0.2,0.5,9.8,1700000000123]);
+  assert.deepEqual(statement.values,['-0.20','0.50','9.80',1700000000123]);
+  assert.equal(statement.text,'SELECT $1,$2,$3,$4');
+  for(const value of [0.001,0.1+0.2,NaN,Infinity,-Infinity,Number.MAX_SAFE_INTEGER+1,1000000000.01])
+    assert.throws(()=>compile([value,0,0,0]));
+  assert.deepEqual(compile([Number.MAX_SAFE_INTEGER,1,0,-2]).values,[Number.MAX_SAFE_INTEGER,1,0,-2]);
+  assert.throws(()=>compile([BigInt(Number.MAX_SAFE_INTEGER)+1n,0,0,0]));
+  assert(Buffer.isBuffer(compile([new Uint8Array([1,2]),0,0,0]).values[0]));
+});
+
+test('five 0.2 charges plus two 0.5 charges pass PostgreSQL parameter binding and settle exactly once at zero',async t=>{
+  const f=await fixture(t,2,undefined,true);
   for(let i=1;i<=5;i++){
     const r=await f.search('baichuan-air','air-'+i);assert.equal(r.statusCode,200,r.body);
     assert.equal(r.json().pointsChargedUnits,20);assert.equal(r.json().pointsAvailableUnits,200-i*20);
@@ -74,7 +98,7 @@ test('five 0.2 charges plus two 0.5 charges settle exactly once and recover at z
 });
 
 test('legacy calls cannot buy fractional models; integer calls keep the exact remainder',async t=>{
-  const f=await fixture(t,2.7);
+  const f=await fixture(t,2.7,undefined,true);
   let r=await call(f.app,'GET','/v1/models/catalog',f.token);assert(!r.json().items.some(m=>['baichuan-air','deepseek-flash'].includes(m.key)));
   r=await f.search('baichuan-air','legacy-block',{},false);assert.equal(r.statusCode,426,r.body);assert.equal(f.calls(),0);
   r=await exact(f.app,'GET','/v1/models/catalog',f.token);assert(r.json().items.some(m=>m.key==='baichuan-air'&&m.pointsPerCallUnits===20));
@@ -87,7 +111,7 @@ test('legacy calls cannot buy fractional models; integer calls keep the exact re
 
 test('pending fractional reservations exclude double-spend; failure releases without a ledger charge',async t=>{
   const entered=Promise.withResolvers(),finish=Promise.withResolvers();let failing=false;
-  const f=await fixture(t,0.6,async()=>{if(failing)throw new Error('TIMEOUT_UNKNOWN');entered.resolve();return finish.promise;});
+  const f=await fixture(t,0.6,async()=>{if(failing)throw new Error('TIMEOUT_UNKNOWN');entered.resolve();return finish.promise;},true);
   t.after(()=>finish.resolve(answer));
   const pending=f.search('baichuan-air','held').then(r=>r);
   await entered.promise;
@@ -143,7 +167,7 @@ test('DeepSeek effort is validated, bound to idempotency and omitted for off/leg
 });
 
 test('fractional admin adjustments validate, replay once and preserve the remainder for legacy adjustments',async t=>{
-  const f=await fixture(t,0.5),url=`/v1/admin/users/${f.owner.principal.userId}/points-adjustments`;
+  const f=await fixture(t,0.5,undefined,true),url=`/v1/admin/users/${f.owner.principal.userId}/points-adjustments`;
   const body={delta:0.2,reason:'synthetic precision adjustment',expectedRevision:(await f.user()).revision};
   let r=await call(f.app,'POST',url,f.token,body,'old-fraction');assert.equal(r.statusCode,426,r.body);
   r=await exact(f.app,'POST',url,f.token,{...body,delta:0.125},'bad-scale');assert.equal(r.statusCode,400,r.body);

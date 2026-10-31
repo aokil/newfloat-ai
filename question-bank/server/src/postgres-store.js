@@ -579,9 +579,17 @@ export class PostgresStore {
   _statement(sql, params) {
     const compiled = postgresSql(sql);
     if (compiled.placeholders && compiled.placeholders !== params.length) throw new Error('SQL parameter count does not match');
-    for (const value of params) if (typeof value === 'number' && !Number.isSafeInteger(value)) throw new RangeError('Database numeric parameters must be safe integers');
-    for (const value of params) if (typeof value === 'bigint' && !Number.isSafeInteger(Number(value))) throw new RangeError('Database bigint parameters must fit the safe application range');
-    return {text:compiled.text,values:params.map(value => value instanceof Uint8Array && !Buffer.isBuffer(value) ? Buffer.from(value) : value)};
+    const values=params.map(value=>{
+      if(typeof value==='number'&&!Number.isSafeInteger(value)){
+        pointUnits(value); // Validate finite, exact hundredths and the monetary range.
+        // Bind decimal text so PostgreSQL NUMERIC receives the exact amount.
+        // Integer columns keep their own integer input validation in PostgreSQL.
+        return value.toFixed(2);
+      }
+      if(typeof value==='bigint'&&!Number.isSafeInteger(Number(value)))throw new RangeError('Database bigint parameters must fit the safe application range');
+      return value instanceof Uint8Array&&!Buffer.isBuffer(value)?Buffer.from(value):value;
+    });
+    return {text:compiled.text,values};
   }
   async get(sql, ...params) {const statement = this._statement(sql,params); return this._usingClient(async client => (await client.query(statement)).rows[0]);}
   async all(sql, ...params) {const statement = this._statement(sql,params); return this._usingClient(async client => (await client.query(statement)).rows);}
