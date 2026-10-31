@@ -1,7 +1,7 @@
 import { createServer } from 'http';
 import { parse } from 'url';
 import next from 'next';
-import { nativeHttpRequest, closeNativeBackend } from './lib/native-backend.server';
+import { nativeHttpRequest, closeNativeBackend, getNativeBackend } from './lib/native-backend.server';
 
 const dev = process.env.COZE_PROJECT_ENV !== 'PROD';
 const hostname = process.env.HOSTNAME || 'localhost';
@@ -44,6 +44,14 @@ app.prepare().then(() => {
         dev ? 'development' : process.env.COZE_PROJECT_ENV
       }`,
     );
+    // Initialize the scoped DEV database before the user publishes its schema.
+    // A plain static preview otherwise leaves an old DEV database untouched.
+    if (process.env.COZE_PROJECT_ENV === 'DEV' && process.env.COZE_PROJECT_ID === '7689833705046130729') {
+      void getNativeBackend().then(
+        () => console.log('DEV business backend ready'),
+        () => console.error('DEV business backend not ready; check /health before deploying'),
+      );
+    }
   });
   const shutdown = () => {
     if (stopping) return;

@@ -1,7 +1,7 @@
 import {AsyncLocalStorage} from 'node:async_hooks';
 import pg from 'pg';
 import {pointUnits} from './point-values.js';
-import {migratePostgresPointPrecision,assertPostgresPointPrecision} from './point-precision-migration.js';
+import {migratePostgresPointPrecision,assertPostgresPointPrecision,ensurePostgresPointPrecision} from './point-precision-migration.js';
 
 const {Pool, types} = pg;
 const SCHEMA_VERSION = 11;
@@ -543,17 +543,24 @@ export class PostgresStore {
           }
         }
       }
-      await client.query('UPDATE schema_metadata SET version=$1,updated_at=$2 WHERE singleton=1',[SCHEMA_VERSION,Date.now()]);
       const completed = await client.query('SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname=$1',[this.schema]);
       const completedNames = new Set(completed.rows.map(row => row.tablename));
       if (APPLICATION_TABLES.some(name => !completedNames.has(name))) throw new Error('PostgreSQL application schema is incomplete');
+      const precision=await ensurePostgresPointPrecision(client,this.schema,()=>this._verifyPointRepairStructure(client,completedNames));
+      if(precision.repaired)await this._verifyPointRepairStructure(client,completedNames,11);
       await assertPostgresPointPrecision(client,this.schema);
+      await client.query('UPDATE schema_metadata SET version=$1,updated_at=$2 WHERE singleton=1',[SCHEMA_VERSION,Date.now()]);
       await client.query('COMMIT');
       this._schemaVersion = SCHEMA_VERSION;
     } catch (error) {
       try {await client.query('ROLLBACK');} catch {failed = true;}
       throw error;
     } finally {client.release(failed);}
+  }
+  async _verifyPointRepairStructure(client,names,expectedVersion=10){
+    const structure=await assertCopiedApplicationStructure(client,this.schema);
+    if(structure.copiedVersion!==expectedVersion||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
+      throw new Error('POINTS_PRECISION_SCHEMA_INVALID');
   }
   async _usingClient(fn, write = false) {
     const context = this._context.getStore();

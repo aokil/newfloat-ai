@@ -30,16 +30,55 @@ export async function assertPostgresPointPrecision(client,schema){
   if(columns.length!==6||columns.some(c=>c.data_type!=='numeric'||Number(c.numeric_precision)!==18||Number(c.numeric_scale)!==2))
     throw failure('POINTS_PRECISION_SCHEMA_INVALID');
 }
+async function validatePostgresPointAmounts(client){
+  for(const [table,names] of Object.entries(COLUMNS)){
+    const invalid=await client.query('SELECT 1 FROM '+table+' WHERE '+names.map(name=>
+      `${name} IS NULL OR ABS(${name}::numeric)>1000000000 OR ${name}::numeric<>TRUNC(${name}::numeric,2)`).join(' OR ')+' LIMIT 1');
+    if(invalid.rows.length)throw failure('POINTS_PRECISION_DATA_INVALID');
+  }
+}
+async function postgresPointSnapshot(client){
+  const snapshot={};
+  for(const [table,names] of Object.entries(COLUMNS)){
+    snapshot[table]=(await client.query('SELECT id,'+names.map(name=>
+      'CAST('+name+'::numeric*100 AS BIGINT) AS '+name).join(',')+' FROM '+table+' ORDER BY id')).rows;
+  }
+  return JSON.stringify(snapshot);
+}
+/** Repair only the known all-BIGINT drift, inside the caller's migration transaction. */
+export async function ensurePostgresPointPrecision(client,schema,beforeRepair=async()=>{},now=Date.now()){
+  let columns=await pointColumns(client,schema);
+  const precise=items=>items.length===6&&items.every(c=>c.data_type==='numeric'&&Number(c.numeric_precision)===18&&Number(c.numeric_scale)===2);
+  if(precise(columns))return {repaired:false};
+  if(columns.length!==6||columns.some(c=>c.data_type!=='bigint'))throw failure('POINTS_PRECISION_SCHEMA_INVALID');
+  await client.query('LOCK TABLE users,points_ledger,ai_requests IN ACCESS EXCLUSIVE MODE');
+  columns=await pointColumns(client,schema);
+  if(precise(columns))return {repaired:false};
+  if(columns.length!==6||columns.some(c=>c.data_type!=='bigint'))throw failure('POINTS_PRECISION_SCHEMA_INVALID');
+  await beforeRepair();
+  if(Number((await client.query("SELECT COUNT(*) n FROM ai_requests WHERE status='pending' AND expires_at>$1",[now])).rows[0].n)>0)
+    throw failure('POINTS_PRECISION_MIGRATION_BUSY');
+  await validatePostgresPointAmounts(client);
+  const checks=[
+    'SELECT 1 FROM users WHERE points_balance<0 OR points_reserved<0 OR points_reserved>points_balance LIMIT 1',
+    'SELECT 1 FROM points_ledger WHERE balance_before::numeric+delta::numeric<>balance_after::numeric OR delta=0 LIMIT 1',
+    "SELECT 1 FROM ai_requests WHERE status='completed' AND result IS NOT NULL AND CASE WHEN result::jsonb->>'pointsCharged' ~ '^-?[0-9]+([.][0-9]{1,2})?$' THEN (result::jsonb->>'pointsCharged')::numeric<>points_cost::numeric ELSE TRUE END LIMIT 1"
+  ];
+  for(const sql of checks)if((await client.query(sql)).rows.length)throw failure('POINTS_PRECISION_DATA_INVALID');
+  const before=await postgresPointSnapshot(client);
+  for(const [table,names] of Object.entries(COLUMNS))
+    await client.query('ALTER TABLE '+table+' '+names.map(name=>'ALTER COLUMN '+name+' TYPE NUMERIC(18,2) USING '+name+'::NUMERIC(18,2)').join(', '));
+  await assertPostgresPointPrecision(client,schema);
+  if(before!==await postgresPointSnapshot(client))throw failure('POINTS_PRECISION_DATA_INVALID');
+  return {repaired:true};
+}
 export async function migratePostgresPointPrecision(client,schema,now=Date.now()){
   const columns=await pointColumns(client,schema);
   if(columns.length!==6||columns.some(c=>c.data_type!=='bigint'&&!(c.data_type==='numeric'&&Number(c.numeric_precision)===18&&Number(c.numeric_scale)===2)))
     throw failure('POINTS_PRECISION_SCHEMA_INVALID');
   const active=await client.query("SELECT COUNT(*) n FROM ai_requests WHERE status='pending' AND expires_at>$1",[now]);
   if(Number(active.rows[0].n)>0)throw failure('POINTS_PRECISION_MIGRATION_BUSY');
-  for(const [table,names] of Object.entries(COLUMNS)){
-    const invalid=await client.query('SELECT 1 FROM '+table+' WHERE '+names.map(name=>`${name} IS NULL OR ABS(${name})>1000000000 OR ${name}<>TRUNC(${name}::numeric,2)`).join(' OR ')+' LIMIT 1');
-    if(invalid.rows.length)throw failure('POINTS_PRECISION_DATA_INVALID');
-  }
+  await validatePostgresPointAmounts(client);
   // Only expired reservations are released; live requests must finish before this migration.
   const expired=await client.query("SELECT id,user_id,points_cost FROM ai_requests WHERE status='pending' FOR UPDATE");
   for(const row of expired.rows){
