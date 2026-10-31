@@ -27,7 +27,8 @@ function safeFailure(error: unknown, stage: string): BackendFailure {
     'SELF_SIGNED_CERT_IN_CHAIN', 'CERT_HAS_EXPIRED', '28P01', '28000', '3D000',
     '42501', '42P01', '42703', '23505', '23514', '22003', '40001', '40P01',
     'COZE_PROJECT_IDENTITY_UNAVAILABLE', 'COZE_BACKEND_MODULE_UNAVAILABLE',
-    'COZE_DATABASE_UNAVAILABLE', 'COZE_RUNTIME_KEY_UNAVAILABLE']);
+    'COZE_DATABASE_UNAVAILABLE', 'COZE_RUNTIME_KEY_UNAVAILABLE',
+    'POINTS_PRECISION_MIGRATION_BUSY', 'POINTS_PRECISION_DATA_INVALID', 'POINTS_PRECISION_SCHEMA_INVALID']);
   if (error && typeof error === 'object') {
     if ('code' in error && typeof error.code === 'string' && codes.has(error.code)) result.code = error.code;
     if (error instanceof Error && codes.has(error.message)) result.code = error.message;
@@ -58,7 +59,7 @@ function runtimeBindingHash(): string {
     'BOOTSTRAP_ADMIN_PHONE', 'PGDATABASE_URL_DEV', 'PGDATABASE_URL_PROD', 'TIYU_SUPABASE_URL_DEV',
     'TIYU_SUPABASE_URL_PROD', 'TIYU_SUPABASE_ANON_KEY_DEV', 'TIYU_SUPABASE_ANON_KEY_PROD',
     'ALIPAY_ENABLED', 'ALIPAY_ENVIRONMENT', 'ALIPAY_APP_ID', 'ALIPAY_SELLER_ID', 'ALIPAY_NOTIFY_URL',
-    'ALIPAY_APP_PRIVATE_KEY', 'ALIPAY_PUBLIC_KEY', 'BAICHUAN_API_KEY', 'NODE_DEBUG'];
+    'ALIPAY_APP_PRIVATE_KEY', 'ALIPAY_PUBLIC_KEY', 'BAICHUAN_API_KEY', 'DEEPSEEK_API_KEY', 'NODE_DEBUG'];
   return createHash('sha256').update(JSON.stringify(names.map(name => [name, process.env[name] ?? null]))).digest('hex');
 }
 

@@ -1,6 +1,7 @@
 import {randomBytes} from 'node:crypto';
 import {ApiError,authenticate,fields,sha256,text} from './security.js';
 import {points} from './account.js';
+import {availablePoints} from './point-values.js';
 import {POINTS_PACKAGES,AlipayFailure,amountString} from './alipay.js';
 
 const NOTIFY_PATH='/v1/payments/alipay/notify';
@@ -48,7 +49,7 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
     return {orderId:row.id,status:row.status,packageId:row.package_id,title:row.package_title,
       amountMinor:row.amount_minor,priceCents:row.amount_minor,amount:amountString(row.amount_minor),currency:'CNY',points:row.points,
       credited:row.status==='paid',pointsCredited:row.status==='paid'?row.points:0,pointsBalance:user.points_balance,
-      pointsAvailable:user.points_balance-user.points_reserved,
+      pointsAvailable:availablePoints(user),
       qrCode:row.status==='pending'&&row.expires_at>Date.now()?row.qr_code:null,
       expiresAt:new Date(row.expires_at).toISOString(),paidAt:row.paid_at===null?null:new Date(row.paid_at).toISOString(),
       errorCode:checkError??row.error_code,confirmationRequired:OPEN_STATUSES.has(row.status),

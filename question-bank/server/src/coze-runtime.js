@@ -28,6 +28,7 @@ export async function createCozeApp({databaseUrl,phoneConfiguration,cozeBridge,e
       smsHmacKey:derive('float-ai/sms-proof/v1').toString('hex'),
       modelMasterKey:env.MODEL_MASTER_KEY || derive('float-ai/model-key/v1').toString('base64'),
       baichuanApiKey:env.BAICHUAN_API_KEY || null,
+      deepseekApiKey:env.DEEPSEEK_API_KEY || null,
       bootstrapAdminPhone:env.BOOTSTRAP_ADMIN_PHONE || null,trustProxy:1,
       androidReleaseCampaign:env.COZE_PROJECT_ENV==='PROD'?new AndroidReleaseCampaign():null});
     app.decorate('phoneReady',Boolean(phoneVerifier));

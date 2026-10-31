@@ -1,8 +1,10 @@
 import {AsyncLocalStorage} from 'node:async_hooks';
 import pg from 'pg';
+import {pointUnits} from './point-values.js';
+import {migratePostgresPointPrecision,assertPostgresPointPrecision} from './point-precision-migration.js';
 
 const {Pool, types} = pg;
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 // All instances share these transaction locks, including single-statement writes.
 const LOCK_NAMESPACE = 1179406145;
 const WRITE_LOCK = 1413564759;
@@ -12,7 +14,7 @@ const APPLICATION_TABLES = ['users','sessions','used_refresh','imports','banks',
   'announcements','announcement_dismissals','external_phone_identities','ai_requests','payment_orders','user_feedback','app_promotions'];
 
 // Coze can copy newer DDL while preserving an older production version marker.
-// Accept copied structures only after checking the complete version-8/9/10 contract;
+// Accept copied structures only after checking the complete version-8/9/10/11 contract;
 // the no-marker recovery additionally requires every business table to be empty.
 const SCHEMA_8_COLUMNS = {
   users:'id:text username:text display_name:text password_hash:text role:text disabled:integer created_at:bigint phone_number:text? phone_verified:integer last_login_at:bigint? membership:text membership_expires:bigint? trial_started:bigint trial_ends:bigint points_balance:bigint points_reserved:bigint revision:integer avatar_id:text?',
@@ -79,7 +81,12 @@ function safeInteger(value) {
   return result;
 }
 const numericTypes = {getTypeParser(oid, format) {
-  if ([20,1700].includes(oid) && format !== 'binary') return safeInteger;
+  if (oid===20 && format !== 'binary') return safeInteger;
+  if (oid===1700 && format !== 'binary') return value=>{
+    const text=String(value);if(!/^-?\d+(?:\.\d{1,2})?$/u.test(text))throw new Error('Unsafe PostgreSQL decimal');
+    if(!/[1-9]/u.test(text.split('.')[1]||''))return safeInteger(text.split('.')[0]);
+    const number=Number(text);pointUnits(number);return number;
+  };
   return types.getTypeParser(oid, format);
 }};
 
@@ -230,7 +237,7 @@ function normalizedDefinition(sql) {
     const token = tokens[i];
     if (i === 0 && token.kind === 'word' && token.text.toUpperCase() === 'CHECK') continue;
     if (token.kind === 'symbol' && ['(',')','[',']'].includes(token.text)) continue;
-    if (token.text === ':' && tokens[i+1]?.text === ':' && tokens[i+2]?.kind === 'word' && ['TEXT','INTEGER','BIGINT'].includes(tokens[i+2].text.toUpperCase())) {i += 2; continue;}
+    if (token.text === ':' && tokens[i+1]?.text === ':' && tokens[i+2]?.kind === 'word' && ['TEXT','INTEGER','BIGINT','NUMERIC'].includes(tokens[i+2].text.toUpperCase())) {i += 2; continue;}
     result.push(token.kind === 'word' ? token.text.toUpperCase() : token.text);
   }
   // pg_get_constraintdef renders IN constants as '= ANY (ARRAY[...])'.
@@ -242,10 +249,11 @@ function normalizedDefinition(sql) {
 
 /** Read-only structural preflight; never writes markers, DDL or business rows. */
 export async function assertCopiedApplicationStructure(client, schema) {
-  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete version-8, version-9 or version-10 application schema');};
+  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete version-8, version-9, version-10 or version-11 application schema');};
   const existing = await client.query('SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname=$1',[schema]);
   const names = new Set(existing.rows.map(row => row.tablename));
-  const payment=names.has('payment_orders'),community=names.has('user_feedback')||names.has('app_promotions'),copiedVersion=community?10:payment?9:8;
+  const payment=names.has('payment_orders'),community=names.has('user_feedback')||names.has('app_promotions');
+  let copiedVersion=community?10:payment?9:8;
   if(community&&!payment)fail();
   const tableNames = [...APPLICATION_TABLES.filter(name=>(community||!['user_feedback','app_promotions'].includes(name))&&(name!=='payment_orders'||payment)),'schema_metadata'];
   const columnContract={...SCHEMA_8_COLUMNS,...(payment?{payment_orders:PAYMENT_COLUMNS}:{}),...(community?{
@@ -256,15 +264,23 @@ export async function assertCopiedApplicationStructure(client, schema) {
   const checkContract={...SCHEMA_8_CHECKS,...(payment?{payment_orders:PAYMENT_CHECKS}:{})};
   const indexContract={...SCHEMA_8_INDEXES,...(payment?{payment_orders_owner:['payment_orders','owner_id,created_at'],payment_orders_pending:['payment_orders','status,expires_at']}:{}),...(community?{user_feedback_time:['user_feedback','created_at,id']}:{})};
   if (tableNames.some(name => !names.has(name))) fail();
-  const columns = await client.query(`SELECT table_name,column_name,data_type,is_nullable,column_default,is_identity,identity_generation
+  const columns = await client.query(`SELECT table_name,column_name,data_type,numeric_precision,numeric_scale,is_nullable,column_default,is_identity,identity_generation
     FROM information_schema.columns WHERE table_schema=$1 AND table_name=ANY($2::text[])`,[schema,tableNames]);
+  const moneyColumns=new Set(['users.points_balance','users.points_reserved','points_ledger.delta','points_ledger.balance_before','points_ledger.balance_after','ai_requests.points_cost']);
+  const decimal=columns.rows.some(row=>moneyColumns.has(row.table_name+'.'+row.column_name)&&row.data_type==='numeric');
+  if(decimal){
+    if(!community)fail();
+    const money=columns.rows.filter(row=>moneyColumns.has(row.table_name+'.'+row.column_name));
+    if(money.length!==6||money.some(row=>row.data_type!=='numeric'||Number(row.numeric_precision)!==18||Number(row.numeric_scale)!==2))fail();
+    copiedVersion=11;
+  }
   for (const [table,specification] of Object.entries(columnContract)) {
     const actual = columns.rows.filter(row => row.table_name === table);
     const expected = specification.split(' ').map(column => {const [name,type] = column.split(':'); return {name,type:type.replace(/\?$/u,''),nullable:type.endsWith('?')};});
     if (actual.length !== expected.length) fail();
     for (const column of expected) {
       const row = actual.find(value => value.column_name === column.name), key = `${table}.${column.name}`;
-      if (!row || row.data_type !== column.type || row.is_nullable !== (column.nullable ? 'YES' : 'NO')) fail();
+      if (!row || row.data_type !== (decimal&&moneyColumns.has(key)?'numeric':column.type) || row.is_nullable !== (column.nullable ? 'YES' : 'NO')) fail();
       if (normalizedDefinition(row.column_default) !== normalizedDefinition(SCHEMA_8_DEFAULTS[key] ?? null)) fail();
       if (key === 'audit.id') {if (row.is_identity !== 'YES' || row.identity_generation !== 'BY DEFAULT') fail();}
       else if (row.is_identity !== 'NO') fail();
@@ -500,7 +516,8 @@ export class PostgresStore {
       let version = marker.version;
       if (version === 0) {await client.query(BASE_SCHEMA); version = 1;}
       for (let next = version+1; next <= SCHEMA_VERSION; next++) {
-        if (version === 8 && next === 9 && names.has('payment_orders')) {
+        if(next===11){await migratePostgresPointPrecision(client,this.schema);}
+        else if (version === 8 && next === 9 && names.has('payment_orders')) {
           // Publishing can copy DEV's payment DDL into PROD without advancing
           // the existing marker. Preserve existing users/ledger/models, but do
           // not adopt an unknown or partially copied payment table.
@@ -512,7 +529,7 @@ export class PostgresStore {
           if (paymentRows.rows.length) throw new Error('Precopied payment table must be empty before version-8 migration');
         } else if(next===10 && (names.has('user_feedback')||names.has('app_promotions'))) {
           const structure=await assertCopiedApplicationStructure(client,this.schema);
-          if(structure.copiedVersion!==10||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
+          if(![10,11].includes(structure.copiedVersion)||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
             throw new Error('Precopied community schema is not the complete version-10 application schema');
           const populated=await client.query('SELECT 1 AS present FROM user_feedback UNION ALL SELECT 1 AS present FROM app_promotions LIMIT 1');
           if(populated.rows.length)throw new Error('Precopied community tables must be empty before version-10 migration');
@@ -530,6 +547,7 @@ export class PostgresStore {
       const completed = await client.query('SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname=$1',[this.schema]);
       const completedNames = new Set(completed.rows.map(row => row.tablename));
       if (APPLICATION_TABLES.some(name => !completedNames.has(name))) throw new Error('PostgreSQL application schema is incomplete');
+      await assertPostgresPointPrecision(client,this.schema);
       await client.query('COMMIT');
       this._schemaVersion = SCHEMA_VERSION;
     } catch (error) {

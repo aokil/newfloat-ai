@@ -15,7 +15,7 @@ const STATIC_PATHS = new Set([
   '/assets/avatars/sources.json', '/assets/model-icons-license.txt',
 ]);
 const REQUEST_HEADERS = ['accept', 'accept-language', 'content-type', 'content-length',
-  'if-none-match', 'if-modified-since', 'range', 'if-range', 'idempotency-key'];
+  'if-none-match', 'if-modified-since', 'range', 'if-range', 'idempotency-key', 'x-float-points-precision'];
 const RESPONSE_HEADERS = ['content-type', 'content-length', 'content-disposition',
   'content-security-policy', 'content-security-policy-report-only', 'cache-control',
   'etag', 'last-modified', 'expires', 'vary', 'retry-after', 'www-authenticate',

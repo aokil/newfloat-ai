@@ -4,11 +4,12 @@ import {ApiError} from './security.js';
 export const AI_IMAGE_LIMIT=1024*1024;
 // Exact IDs verified against official model documentation, never product names/prices.
 const DOCUMENTED_IMAGE_MODELS=new Set([
+  'deepseek-flash',
   'doubao-seed-2-0-pro-260215','doubao-seed-2-0-lite-260215','doubao-seed-2-0-mini-260215',
   'qwen-3-5-plus-260215','qwen3.5-plus','qwen3.5-plus-2026-02-15'
 ]);
 export function modelSupportsImages(modelId,inputTypes){
-  if(['Baichuan-M2','Baichuan-M3'].includes(modelId))return false;
+  if(['Baichuan4-Air','Baichuan-M2','Baichuan-M3','deepseek-v4-pro'].includes(modelId))return false;
   if(Array.isArray(inputTypes))return inputTypes.some(value=>typeof value==='string'&&['image','image_url'].includes(value.toLowerCase()));
   return DOCUMENTED_IMAGE_MODELS.has(modelId);
 }

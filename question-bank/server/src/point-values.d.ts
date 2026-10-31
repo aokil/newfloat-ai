@@ -1,0 +1,9 @@
+export const POINT_SCALE:100;
+export const MAX_POINT_VALUE:number;
+export function pointUnits(value:unknown):number;
+export function pointValue(units:number):number;
+export function availablePointUnits(user:{points_balance:number;points_reserved:number}):number;
+export function availablePoints(user:{points_balance:number;points_reserved:number}):number;
+export function isPointAmount(value:unknown,options?:{positive?:boolean}):boolean;
+export function precisePointsRequest(req:{headers?:Record<string,string|undefined>}):boolean;
+export function pointsResponse(value:unknown,precise:boolean):unknown;

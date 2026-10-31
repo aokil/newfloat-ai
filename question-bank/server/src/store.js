@@ -1,6 +1,7 @@
 import {DatabaseSync} from 'node:sqlite';
 import {mkdirSync} from 'node:fs';
 import {dirname} from 'node:path';
+import {migrateSqlitePointPrecision} from './point-precision-migration.js';
 
 export class Store {
   constructor(filename) {
@@ -8,7 +9,7 @@ export class Store {
     this.db = new DatabaseSync(filename);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
     const version = this.db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 10) {this.db.close();throw new Error('Database schema is newer than this server');}
+    if (version > 11) {this.db.close();throw new Error('Database schema is newer than this server');}
     if (version === 0) this.transaction(() => this.db.exec(`
       CREATE TABLE users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL,
         role TEXT NOT NULL CHECK(role IN ('user','admin')), disabled INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
@@ -138,6 +139,7 @@ export class Store {
       CREATE TABLE app_promotions(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,content TEXT NOT NULL,updated_at INTEGER NOT NULL,updated_by TEXT NOT NULL REFERENCES users(id));
       PRAGMA user_version=10;
     `));
+    if(version<11){try{this.transaction(()=>migrateSqlitePointPrecision(this));}catch(error){this.db.close();throw error;}}
   }
   get(sql, ...params) { return this.db.prepare(sql).get(...params); }
   all(sql, ...params) { return this.db.prepare(sql).all(...params); }

@@ -261,7 +261,7 @@ function productionConfigurationHash(): string | null {
     (state.identityHash !== undefined && state.identityHash !== identityFingerprint()) ||
     (state.phase !== undefined && state.phase !== 'PROD')) return null;
   const resources = ['PGDATABASE_URL_PROD', 'TIYU_SUPABASE_URL_PROD', 'TIYU_SUPABASE_ANON_KEY_PROD',
-    'COZE_DEVBOX_ENV', 'PROJECT_PATH', 'COZE_WORKSPACE_PATH', 'TIYU_GATEWAY_KEY', 'BOOTSTRAP_ADMIN_PHONE', 'BAICHUAN_API_KEY'];
+    'COZE_DEVBOX_ENV', 'PROJECT_PATH', 'COZE_WORKSPACE_PATH', 'TIYU_GATEWAY_KEY', 'BOOTSTRAP_ADMIN_PHONE', 'BAICHUAN_API_KEY', 'DEEPSEEK_API_KEY'];
   return createHash('sha256').update(JSON.stringify([identityFingerprint(),
     ...resources.map(name => [name, process.env[name] ?? null])])).digest('hex');
 }

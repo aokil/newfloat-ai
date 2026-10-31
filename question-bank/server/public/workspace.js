@@ -22,13 +22,14 @@ window.FloatWorkspace = function (ctx) {
     preferenceUser = id; clearModelKey(); catalog = null; history = [];
     try { prefs = JSON.parse(localStorage.getItem(prefsKey()) || '{}'); } catch { prefs = {}; }
     if (!prefs || typeof prefs !== 'object' || Array.isArray(prefs)) prefs = {};
+    if (!['off', 'low', 'high'].includes(prefs.deepseekEffort)) prefs.deepseekEffort = prefs.deepseekThinking === true ? 'high' : 'off';
     if (!['light', 'dark', 'system'].includes(prefs.appearance)) prefs.appearance = 'system';
     if (!avatars.some(a => a.id === prefs.avatarId)) savePreference('avatarId', avatars[Math.floor(Math.random() * avatars.length)].id);
     applyTheme();
   }
   function savePreference(name, val) {
     prefs[name] = val;
-    const stored = {appearance: prefs.appearance, avatarId: prefs.avatarId, modelKey: prefs.modelKey, aiFallback: prefs.aiFallback === true};
+    const stored = {appearance: prefs.appearance, avatarId: prefs.avatarId, modelKey: prefs.modelKey, aiFallback: prefs.aiFallback === true, deepseekEffort: prefs.deepseekEffort, deepseekThinking: prefs.deepseekEffort !== 'off'};
     try { localStorage.setItem(prefsKey(), JSON.stringify(stored)); } catch { notify('当前浏览器无法记住偏好，本次仍已生效'); }
   }
   function applyTheme() {
@@ -43,6 +44,14 @@ window.FloatWorkspace = function (ctx) {
   }
   const account = () => getSession()?.account || {};
   const points = () => Number(account().pointsAvailable || 0);
+  function acceptPoints(response) {
+    const next = {...account(), pointsAvailable: response.pointsAvailable};
+    delete next.pointsAvailableUnits;
+    if (response.pointsUnitScale === 100 && Number.isSafeInteger(response.pointsAvailableUnits)) {
+      next.pointsAvailableUnits = response.pointsAvailableUnits; next.pointsUnitScale = 100;
+    }
+    mergeSession({account: next});
+  }
   function avatar() { return avatars.find(a => a.id === (account().avatarId || prefs.avatarId)) || avatars[0]; }
   function portrait(a, className = '') { return el('img', {class: 'float-avatar ' + className, src: a.src, alt: a.name, width: 72, height: 72}); }
   function iconButton(label, name, action, cls = '') {
@@ -66,7 +75,8 @@ window.FloatWorkspace = function (ctx) {
     const rows = [
       ['豆包 Mini、豆包 Lite', 1], ['Qwen 3.5 Plus', 1], ['MiniMax M2.5、MiniMax M2.7', 1],
       ['GLM 4.7', 1], ['GLM 5.0、GLM 5-Turbo', 2], ['豆包 2.1 Pro', 2],
-      ['百川 M2（医学推理）', 1], ['百川 M3（医学推理）', 2]
+      ['百川 4-Air（通用快速）', 0.2], ['百川 M2（医学推理）', 1], ['百川 M3（医学推理）', 2],
+      ['DeepSeek Flash', 0.5], ['DeepSeek Pro', 2]
     ];
     return el('table', {class: 'float-price-table'}, el('caption', {}, '内置模型价目'),
       el('thead', {}, el('tr', {}, el('th', {scope: 'col'}, '模型'), el('th', {scope: 'col'}, '每次调用'))),
@@ -80,7 +90,7 @@ window.FloatWorkspace = function (ctx) {
       priceTable(),
       el('p', {}, '按每次模型调用计算。剩余 1 点时，可以使用基础功能和 1 点模型；调用 2 点模型需要至少 2 点。'),
       el('p', {}, el('strong', {}, '自带 API Key 不扣平台点数。'), '例如自行接入 DeepSeek，费用由相应模型服务商结算。基础功能仍要求账户可用点数大于 0。'),
-      el('p', {}, '内置模型可由 Coze 项目集成提供，无需你填写供应商 Key；仍按成功调用的 1／2 点档位结算。可用型号与实际名称以模型选择页为准。'),
+      el('p', {}, '内置模型由后台接入，无需你填写供应商 Key；按所选模型的成功调用价格结算，失败不扣该次平台点数。DeepSeek 开启思考可能等待更久，计点价格不变。可用型号与实际名称以模型选择页为准。'),
       el('p', {class: 'muted'}, '未配置、测试未通过或暂时停用的模型不会发起调用。请求失败不扣平台点数；超时后先找回结果，避免重复发送。'));
   }
   async function profilePage(alive) {
@@ -178,7 +188,7 @@ window.FloatWorkspace = function (ctx) {
     span.innerHTML = typeof source === 'string' ? source : (source.svg || ''); return span;
   }
   async function getCatalog() {
-    try { catalog = await api('/v1/models/catalog'); if (Number.isFinite(catalog.pointsAvailable)) mergeSession({account: {...account(), pointsAvailable: catalog.pointsAvailable}}); return catalog; }
+    try { catalog = await api('/v1/models/catalog'); if (Number.isFinite(catalog.pointsAvailable)) acceptPoints(catalog); return catalog; }
     catch (error) { catalog = null; throw error; }
   }
   function modelCatalogHint(error) {
@@ -196,10 +206,20 @@ window.FloatWorkspace = function (ctx) {
       const data = await getCatalog(); if (!alive()) return; replace(area, );
       const grouped = new Map();
       for (const m of data.items) { const brand = modelBrand(m); if (!grouped.has(brand)) grouped.set(brand, []); grouped.get(brand).push(m); }
-      const names = {doubao: '豆包', glm: '智谱 GLM', minimax: 'MiniMax', qwen: '通义千问', baichuan: '百川模型（医学推理）', deepseek: 'DeepSeek', custom: '其他模型'};
+      const names = {doubao: '豆包', glm: '智谱 GLM', minimax: 'MiniMax', qwen: '通义千问', baichuan: '百川模型', deepseek: 'DeepSeek', custom: '其他模型'};
       for (const [brand, items] of grouped) {
         const section = el('section', {class: 'float-model-group'}, el('h2', {}, brandIcon(brand), names[brand]));
+        if (brand === 'baichuan') section.querySelector('h2').append(iconButton('百川模型说明', 'circle-alert', () =>
+          readDialog('百川模型', el('div', {}, el('p', {}, '4-Air：通用快速模型，正确率有待考量，每题 0.2 点。'),
+            el('p', {}, 'M2 / M3：医疗模型，整合海量医学知识与诊疗逻辑，提升医学理解与应用能力，更好针对医学学习。M2 每题 1 点，可用于医学知识理解、问答推理；M3 每题 2 点，复杂推理效果更好，同时时间更长。'),
+            el('p', {}, '本应用接入的百川模型不支持图像识别。')))));
+        if (brand === 'deepseek') section.querySelector('h2').append(thinkingControl(alive));
+        let medicalHeading = false;
         for (const m of items) {
+          if (brand === 'baichuan') {
+            if (m.key === 'baichuan-air') section.append(el('h3', {}, '通用快速'));
+            else if (!medicalHeading) { section.append(el('h3', {}, '医学推理')); medicalHeading = true; }
+          }
           const selected = prefs.modelKey === m.key;
           const b = button(m.name, () => { savePreference('modelKey', m.key); notify('已选择 ' + m.name); return show('userModels'); }, 'float-model-option' + (selected ? ' selected' : ''));
           replace(b, el('span', {}, m.name, el('small', {}, m.available ? m.pointsPerCall + ' 点 / 次' : ({MODEL_NOT_CONFIGURED:'尚未配置',MODEL_CONFIG_MISMATCH:'配置待调整',MODEL_KEY_NOT_CONFIGURED:'尚未配置密钥',MODEL_NOT_VERIFIED:'尚未验证',MODEL_DISABLED:'暂时停用',COZE_INTEGRATION_NOT_READY:'Coze 内置集成尚未就绪',INSUFFICIENT_POINTS:'可用点数不足'}[m.unavailableReason] || '暂不可用'))), selected ? icon('check') : el('strong', {}, m.pointsPerCall + ' 点'));
@@ -211,6 +231,19 @@ window.FloatWorkspace = function (ctx) {
         menu(keySession ? keySession.name : '接入 DeepSeek / 自定义模型', 'plus', () => show('byok'), '不扣平台点数')));
       main.append(el('p', {class: 'float-caption'}, '基础功能需可用点数大于 0 · 内置模型按次计点'));
     } catch (error) { if (alive()) replace(area, modelCatalogFailure(error, () => show('userModels'))); }
+  }
+  function thinkingControl(alive) {
+    const user = getSession()?.principal?.userId;
+    const input = el('select', {class: 'float-thinking-select', 'aria-label': 'DeepSeek 思考档位：Light 关闭，Medium 较低，High 较高',
+      title: '开启思考后可能等待更久'},
+      el('option', {value: 'off'}, 'Light · 关闭'), el('option', {value: 'low'}, 'Medium'), el('option', {value: 'high'}, 'High'));
+    input.value = prefs.deepseekEffort;
+    input.addEventListener('change', () => {
+      if (!alive() || getSession()?.principal?.userId !== user || !['off', 'low', 'high'].includes(input.value)) return;
+      savePreference('deepseekEffort', input.value);
+      notify(input.value === 'off' ? '已关闭 DeepSeek 思考' : '已调整思考强度，开启后可能等待更久');
+    });
+    return el('label', {class: 'float-thinking-control'}, el('span', {}, '思考'), input);
   }
   function modelSettingsPage() {
     loadPreferences(); pageHeader('模型设置', 'userModels');
@@ -280,7 +313,7 @@ window.FloatWorkspace = function (ctx) {
     }
     function complete(response, query) {
       if (response.status !== 'completed') throw Error('模型结果尚未确认，请稍后找回结果');
-      mergeSession({account: {...account(), pointsAvailable: response.pointsAvailable}});
+      acceptPoints(response);
       replace(result, el('h2', {}, '答案'), el('div', {class: 'answer'}, response.answer), response.explanation ? el('div', {class: 'pre'}, response.explanation) : null,
         el('p', {class: 'muted'}, 'AI · ' + response.model.name + ' · 本次 ' + response.pointsCharged + ' 点'), el('details', {}, el('summary', {}, '查看题目'), el('p', {class: 'pre'}, query)));
       history.unshift({time: Date.now(), question: query, answer: response.answer}); history = history.slice(0, 50); operation = null;
@@ -295,7 +328,11 @@ window.FloatWorkspace = function (ctx) {
       const selected = selectedModel();
       if (prefs.modelKey !== 'byok' && (!selected?.available || points() < selected.pointsPerCall)) { notify(!selected?.available ? '该模型暂不可用，请重新选择' : '点数不足以调用所选模型', true); return; }
       const body = prefs.modelKey === 'byok' ? {mode: 'byok', question: value(question), byok: {provider: keySession.provider, modelId: keySession.modelId, apiKey: keySession.apiKey}} : {mode: 'builtin', modelKey: prefs.modelKey, question: value(question)};
-      const fingerprint = [body.mode, body.modelKey || keySession?.modelId, body.question].join('|');
+      if (body.mode === 'builtin' && ['deepseek-flash', 'deepseek-pro'].includes(body.modelKey)) {
+        body.thinking = prefs.deepseekEffort !== 'off';
+        if (body.thinking) body.reasoningEffort = prefs.deepseekEffort;
+      }
+      const fingerprint = [body.mode, body.modelKey || keySession?.modelId, body.question, body.thinking, body.reasoningEffort].join('|');
       if (!operation || operation.fingerprint !== fingerprint) operation = {fingerprint, key: crypto.randomUUID(), question: body.question, uncertain: false};
       submit.disabled = true; question.input.readOnly = true; submit.classList.add('is-busy'); replace(result, el('p', {role: 'status'}, '正在等待模型回答…'));
       try {

@@ -1,6 +1,7 @@
 import {createCipheriv,createDecipheriv,randomBytes} from 'node:crypto';
 import {ApiError,sha256} from './security.js';
-import {catalogEntry,BAICHUAN_MODEL_IDS} from './model-catalog.js';
+import {catalogEntry,BAICHUAN_MODEL_IDS,DEEPSEEK_MODEL_IDS,environmentModelSlot} from './model-catalog.js';
+import {isPointAmount} from './point-values.js';
 import {ANSWER_ONLY_PROMPT,answerBudget,minimalAnswer} from './answer-only.js';
 import {aiImageUrl} from './ai-image.js';
 import {parseModelAnswer} from './model-answer.js';
@@ -8,8 +9,9 @@ import {OCR_EXTRACTION_PROMPT,parseExtraction,isDoubaoMiniModelId} from './ocr-e
 export const MODEL_ORIGINS=Object.freeze({deepseek:'https://api.deepseek.com',doubao:'https://ark.cn-beijing.volces.com/api/v3',
   glm:'https://open.bigmodel.cn/api/paas/v4',minimax:'https://api.minimax.io/v1',qwen:'https://dashscope.aliyuncs.com/compatible-mode/v1',baichuan:'https://api.baichuan-ai.com/v1'});
 export const MODEL_PROVIDERS=Object.freeze(Object.entries(MODEL_ORIGINS).map(([id,baseUrl])=>({id,baseUrl,
-  name:{deepseek:'DeepSeek',doubao:'豆包',glm:'GLM',minimax:'MiniMax',qwen:'Qwen',baichuan:'百川（医学推理）'}[id],
-  credentialSource:id==='baichuan'?'environment':'saved'})));
+  name:{deepseek:'DeepSeek',doubao:'豆包',glm:'GLM',minimax:'MiniMax',qwen:'Qwen',baichuan:'百川'}[id],
+  credentialSource:id==='baichuan'?'environment':'saved',
+  ...(id==='baichuan'?{environmentModels:BAICHUAN_MODEL_IDS,environmentVariable:'BAICHUAN_API_KEY'}:id==='deepseek'?{environmentModels:DEEPSEEK_MODEL_IDS,environmentVariable:'DEEPSEEK_API_KEY'}:{})})));
 export const BYOK_PROVIDERS=Object.freeze(MODEL_PROVIDERS.filter(item=>item.id!=='baichuan').map(item=>({id:item.id,baseUrl:item.baseUrl,name:item.name})));
 export function environmentModelKeyFingerprint(value){
   const key=typeof value==='string'?value.trim():'';
@@ -32,10 +34,12 @@ export function modelConfig(input,old={}){
     maxOutputTokens:input.maxOutputTokens??old.maxOutputTokens??256,timeoutMs:input.timeoutMs??old.timeoutMs??(execution==='coze'?30000:10000),
     pointsPerCall:input.pointsPerCall??old.pointsPerCall,
     catalogKey:input.catalogKey===undefined?(old.catalogKey??null):input.catalogKey};
-  if(value.provider==='baichuan'){
-    if(execution!=='official'||Object.hasOwn(input,'apiKey')||Object.hasOwn(input,'removeKey'))throw new ApiError(400,'INVALID_REQUEST','百川仅使用服务端 BAICHUAN_API_KEY 环境密钥，不接收客户端或数据库 Key');
-    if(!Object.hasOwn(BAICHUAN_MODEL_IDS,value.catalogKey)||value.modelId!==BAICHUAN_MODEL_IDS[value.catalogKey])throw new ApiError(400,'INVALID_REQUEST','百川仅支持对应目录中的 Baichuan-M2 和 Baichuan-M3');
-    if(input.maxOutputTokens!==undefined&&input.maxOutputTokens!==2048)throw new ApiError(400,'INVALID_REQUEST','百川固定使用较低预算：生成 2048、思考 1024');
+  const environment=environmentModelSlot(value);
+  if(value.provider==='baichuan'&&!environment)throw new ApiError(400,'INVALID_REQUEST','请选择百川目录中的实际型号');
+  if(environment){
+    if(execution!=='official'||Object.hasOwn(input,'apiKey')||Object.hasOwn(input,'removeKey'))throw new ApiError(400,'INVALID_REQUEST','该内置型号仅使用服务端环境密钥，不接收客户端或数据库 Key');
+    if(value.modelId!==environment.modelId)throw new ApiError(400,'INVALID_REQUEST','实际模型 ID 与内置目录不匹配');
+    if(input.maxOutputTokens!==undefined&&input.maxOutputTokens!==2048)throw new ApiError(400,'INVALID_REQUEST','该内置型号配置的生成上限固定为 2048');
     value.maxOutputTokens=2048;
   }
   if(value.catalogKey!==null){const item=catalogEntry(value.catalogKey);if(!item||item.provider!==value.provider)throw new ApiError(400,'INVALID_REQUEST','模型目录与服务商不匹配');
@@ -44,23 +48,25 @@ export function modelConfig(input,old={}){
   if(!Object.keys(MODEL_ORIGINS).includes(value.provider)||(execution==='official'&&value.baseUrl!==MODEL_ORIGINS[value.provider]))throw new ApiError(400,'INVALID_REQUEST','模型服务必须为已核对的官方HTTPS地址');
   for(const key of ['displayName','modelId'])if(typeof value[key]!=='string'||!value[key].trim()||value[key].length>200||/[\r\n\u0000]/u.test(value[key]))throw new ApiError(400,'INVALID_REQUEST','请填写模型名称与真实模型ID');
   if(typeof value.enabled!=='boolean'||!Array.isArray(value.capabilities)||value.capabilities.length!==1||value.capabilities[0]!=='text')throw new ApiError(400,'INVALID_REQUEST','本轮测试仅验证text能力；不能假报图像能力');
-  for(const [key,min,max] of [['maxOutputTokens',1,8192],['timeoutMs',execution==='coze'?3000:1000,30000],['pointsPerCall',1,1000000]])if(!Number.isSafeInteger(value[key])||value[key]<min||value[key]>max)throw new ApiError(400,'INVALID_REQUEST',`${key}范围无效`);
+  for(const [key,min,max] of [['maxOutputTokens',1,8192],['timeoutMs',execution==='coze'?3000:1000,30000]])if(!Number.isSafeInteger(value[key])||value[key]<min||value[key]>max)throw new ApiError(400,'INVALID_REQUEST',`${key}范围无效`);
+  if(!isPointAmount(value.pointsPerCall,{positive:true})||value.pointsPerCall>1000000)throw new ApiError(400,'INVALID_REQUEST','每次点数须为最多两位小数的正数');
   return value;
 }
 function masterKey(value){let key;try{key=Buffer.from(value||'','base64');}catch{}if(key?.length!==32)throw new ApiError(503,'MODEL_KEY_NOT_CONFIGURED','未配置模型密钥加密主密钥');return key;}
 export function sealKey(secret,master){if(typeof secret!=='string'||secret.length<8||secret.length>4096||/[\r\n]/u.test(secret))throw new ApiError(400,'INVALID_REQUEST','API Key格式无效');const iv=randomBytes(12),cipher=createCipheriv('aes-256-gcm',masterKey(master),iv);const bytes=Buffer.concat([cipher.update(secret,'utf8'),cipher.final()]);return JSON.stringify({iv:iv.toString('base64'),tag:cipher.getAuthTag().toString('base64'),data:bytes.toString('base64')});}
 export function openKey(value,master){const j=JSON.parse(value),decipher=createDecipheriv('aes-256-gcm',masterKey(master),Buffer.from(j.iv,'base64'));decipher.setAuthTag(Buffer.from(j.tag,'base64'));return Buffer.concat([decipher.update(Buffer.from(j.data,'base64')),decipher.final()]).toString('utf8');}
-export function modelSecret(config,row,master,baichuanApiKey=null){
+export function modelSecret(config,row,master,baichuanApiKey=null,deepseekApiKey=null){
   if(config.execution==='coze')return null;
-  if(config.provider==='baichuan'){
-    if(!environmentModelKeyFingerprint(baichuanApiKey))throw new Error('MODEL_KEY_NOT_CONFIGURED');
-    return baichuanApiKey.trim();
+  if(environmentModelSlot(config)){
+    const secret=config.provider==='baichuan'?baichuanApiKey:deepseekApiKey;
+    if(!environmentModelKeyFingerprint(secret))throw new Error('MODEL_KEY_NOT_CONFIGURED');
+    return secret.trim();
   }
   return openKey(row.encrypted_key,master);
 }
-export function modelView(row,baichuanApiKey=null){const config=JSON.parse(row.config);return {id:row.id,execution:'official',...config,revision:row.revision,
-  credentialSource:config.provider==='baichuan'?'environment':config.execution==='coze'?'coze':'saved',
-  keyConfigured:config.provider==='baichuan'?!!environmentModelKeyFingerprint(baichuanApiKey):!!row.encrypted_key,keyFingerprint:row.key_fingerprint?.slice(0,12)??null,lastTestAt:row.last_test_at?new Date(row.last_test_at).toISOString():null,lastTestStatus:row.last_test_status??'not_tested',lastTestErrorCode:row.last_test_error??null,...(row.last_test_result?{lastTestResult:JSON.parse(row.last_test_result)}:{})};}
+export function modelView(row,baichuanApiKey=null,deepseekApiKey=null){const config=JSON.parse(row.config),environment=environmentModelSlot(config);return {id:row.id,execution:'official',...config,revision:row.revision,
+  credentialSource:environment?'environment':config.execution==='coze'?'coze':'saved',
+  keyConfigured:environment?!!environmentModelKeyFingerprint(config.provider==='baichuan'?baichuanApiKey:deepseekApiKey):!!row.encrypted_key,keyFingerprint:row.key_fingerprint?.slice(0,12)??null,lastTestAt:row.last_test_at?new Date(row.last_test_at).toISOString():null,lastTestStatus:row.last_test_status??'not_tested',lastTestErrorCode:row.last_test_error??null,...(row.last_test_result?{lastTestResult:JSON.parse(row.last_test_result)}:{})};}
 export function byokConfiguration(input){
   if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['provider','modelId','apiKey','baseUrl'].includes(k)))throw new ApiError(400,'INVALID_REQUEST','自带模型配置无效');
   let provider=input.provider,baseUrl=input.baseUrl;
@@ -79,7 +85,14 @@ async function officialCompletion(config,apiKey,messages,maxTokens){
   const body={model:config.modelId,messages,max_tokens:maxTokens,stream:false};
   if(config.provider==='baichuan'){
     if(!Object.values(BAICHUAN_MODEL_IDS).includes(config.modelId))throw new Error('INVALID_PROVIDER');
-    body.max_tokens=2048;body.thinking={budget_tokens:1024};
+    if(config.modelId!=='Baichuan4-Air'){body.max_tokens=2048;body.thinking={budget_tokens:1024};}
+  }else if(environmentModelSlot(config)?.provider==='deepseek'){
+    body.thinking={type:config.deepseekThinking===true?'enabled':'disabled'};
+    if(config.deepseekThinking===true){
+      const effort=config.deepseekReasoningEffort??'high';
+      if(!['low','high'].includes(effort))throw new Error('INVALID_PROVIDER');
+      body.reasoning_effort=effort;body.max_tokens=4096;
+    }
   }else if(config.provider==='qwen')body.enable_thinking=false;
   else if(config.provider==='minimax')body.reasoning_split=true;
   else body.thinking={type:'disabled'};
@@ -91,6 +104,7 @@ async function officialCompletion(config,apiKey,messages,maxTokens){
   try{while(true){const {done,value}=await reader.read();if(done)break;total+=value.length;if(total>128*1024){await reader.cancel();throw new Error('PROVIDER_RESPONSE_TOO_LARGE');}chunks.push(value);}}
   catch(error){if(error.message==='PROVIDER_RESPONSE_TOO_LARGE')throw error;throw new Error(error.name==='TimeoutError'?'TIMEOUT_UNKNOWN':'NETWORK_UNKNOWN');}
   let result;try{result=JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{throw new Error('INVALID_PROVIDER_RESPONSE');}const choice=result.choices?.[0];
+  if(config.deepseekThinking===true&&choice?.finish_reason==='length')throw new Error('TRUNCATED_RESPONSE');
   if(!choice||typeof choice.message?.content!=='string'||!choice.message.content.trim())throw new Error('EMPTY_RESPONSE');
   if(choice.finish_reason==='length')throw new Error('TRUNCATED_RESPONSE');
   if(choice.finish_reason!=='stop')throw new Error('INCOMPLETE_RESPONSE');
@@ -106,7 +120,7 @@ export async function officialModelTest(config,apiKey){
   return {status:'passed',...receipt};
 }
 export async function officialModelSearch(config,apiKey,question,image=null){
-  if(config.provider==='baichuan'&&image)throw new ApiError(422,'MODEL_IMAGE_UNSUPPORTED','百川医学推理模型不支持直接发送图片，请关闭图片开关后重试');
+  if((config.provider==='baichuan'||config.modelId==='deepseek-v4-pro')&&image)throw new ApiError(422,'MODEL_IMAGE_UNSUPPORTED','当前模型不支持直接发送图片，请关闭图片开关后重试');
   const {content,...receipt}=await officialCompletion(config,apiKey,[
     {role:'system',content:ANSWER_ONLY_PROMPT},
     {role:'user',content:image?[{type:'text',text:question},{type:'image_url',image_url:{url:aiImageUrl(image)}}]:question}

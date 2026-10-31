@@ -10,6 +10,7 @@ if(!['127.0.0.1','::1','localhost'].includes(host)&&process.env.BEHIND_HTTPS_PRO
 const app=await buildApp({database:resolve(process.env.BANK_DATABASE||'data/bank.sqlite'),logger:true,
   smsTransport:configuredSmsTransport(),phoneVerifier:configuredSupabasePhone(),smsHmacKey:process.env.SMS_HMAC_KEY||null,modelMasterKey:process.env.MODEL_MASTER_KEY||null,cozeBridge:configuredCozeBridge(),
   baichuanApiKey:process.env.BAICHUAN_API_KEY||null,
+  deepseekApiKey:process.env.DEEPSEEK_API_KEY||null,
   paymentTransport:configuredAlipayTransport(),appUpdateDirectory:process.env.APP_UPDATE_DIRECTORY?resolve(process.env.APP_UPDATE_DIRECTORY):null,
   androidReleaseCampaign:new AndroidReleaseCampaign()});
 await app.listen({host,port});

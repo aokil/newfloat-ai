@@ -1,5 +1,7 @@
 # M2管理员、短信注册、会员、点数、模型与公告合同 v1
 
+2026-10-30：小数点数、schema11、百川4-Air和内置DeepSeek Flash/Pro见 [point-precision-v2](point-precision-v2.md)。新管理页支持最多两位小数并携带精度头；新内置型号的Key仅来自Coze服务端环境（百川共用BAICHUAN_API_KEY，DeepSeek为DEEPSEEK_API_KEY），表单不能保存到数据库，真实测试后才可启用。现仅源码及合成测试，无生产配置/迁移/部署。
+
 M3.1 密码规则和短信找回以 [password-recovery-v1](password-recovery-v1.md) 为准：新密码 6–64 字符，旧长密码登录兼容；增加短信重设并撤销旧会话。下方旧密码长度说明仅为历史基线。
 
 2026-09-27用户新增必须项，优先于cloud-v1中旧的普通用户名注册说明。既有个人导入、独立公共发布及账号隔离继续有效。基础token/session字段不删除。

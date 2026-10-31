@@ -232,6 +232,7 @@ function showFormError(node,message){node.textContent=message;node.tabIndex=-1;n
 function select(label,options,value){const input=el('select',{'aria-label':label},Object.entries(options).map(([v,t])=>el('option',{value:v},t)));input.value=value;return{input,node:el('label',{class:'field'},el('span',{},label),input)};}
 const inputValue=f=>f.input.value;
 function number(f){if(!inputValue(f).trim())throw Error('请填写整数');const n=Number(inputValue(f));if(!Number.isSafeInteger(n))throw Error('请填写整数');return n;}
+function pointNumber(f){const text=inputValue(f).trim(),n=Number(text);if(!/^-?\d+(?:\.\d{1,2})?$/.test(text)||!Number.isFinite(n)||Math.abs(n)>1e9)throw Error('点数需为最多两位小数的有效金额');return n;}
 function table(headers,rows){return el('div',{class:'tablewrap'},el('table',{role:'table'},el('thead',{role:'rowgroup'},el('tr',{role:'row'},headers.map(h=>el('th',{scope:'col',role:'columnheader'},h)))),el('tbody',{role:'rowgroup'},rows.length?rows.map(cells=>el('tr',{role:'row'},cells.map((c,i)=>el('td',{role:'cell','data-label':headers[i]},el('span',{class:'cell-label','aria-hidden':'true'},headers[i]),el('div',{class:'cell-value'},c))))):el('tr',{role:'row'},el('td',{colspan:headers.length,class:'empty',role:'cell'},'暂无记录')))));}
 function actions(...buttons){if(buttons.length<=2)return el('div',{class:'row actions'},buttons);const more=el('details',{class:'action-menu'},el('summary',{'aria-label':'更多操作',title:'更多操作'},icon('more')),el('div',{class:'menu-items'},buttons.slice(2)));return el('div',{class:'row actions'},buttons.slice(0,2),more);}
 function heading(title,description){main.replaceChildren(el('div',{class:'page-heading'},el('div',{},el('h1',{},title),description?el('p',{class:'muted'},description):null)));}
@@ -239,7 +240,7 @@ function dialog(title,fields,submitLabel,onSubmit){const operationKey=crypto.ran
 function readDialog(title,content){const box=el('dialog',{},el('div',{class:'dialogbody'},el('h2',{},title),content,el('div',{class:'dialogactions'},button('关闭',()=>box.close()))));box.addEventListener('close',()=>box.remove());document.body.append(box);box.showModal();}
 // No idle subscription or network-restored retry; api() checks protected operations.
 function clearSession(){web.reset();epoch++;$('subnav').replaceChildren();shell.classList.add('signed-out');session=null;refreshFlight=null;document.querySelectorAll('dialog').forEach(d=>d.close());if(nav){nav.remove();nav=null;}$('account').replaceChildren();loginPage(false,'',false);}
-async function raw(path,{method='GET',body,token,key}={}){if(!path.startsWith('/v1/'))throw Error('接口地址无效');const headers={Accept:'application/json'};if(token)headers.Authorization='Bearer '+token;if(key)headers['Idempotency-Key']=key;const multipart=body instanceof FormData;if(body!==undefined&&!multipart)headers['Content-Type']='application/json';let response;try{response=await fetch(path,{method,headers,body:body===undefined?undefined:multipart?body:JSON.stringify(body),cache:'no-store',credentials:'omit',redirect:'error'});}catch{throw Error('连接失败；若已提交修改，请刷新核对结果后再重试。');}let data={};if(response.status!==204){try{data=await response.json();}catch{throw Error('服务返回了无法读取的结果，请重新检查连接。');}}if(!response.ok){const missingModelService=response.status===404&&['/v1/models/catalog','/v1/admin/coze-models'].includes(path.split('?')[0]);const e=Error(missingModelService?'当前后台尚未提供模型目录，配套模型服务还未上线':data.error?.message||'服务请求失败');e.code=missingModelService?'MODEL_SERVICE_NOT_DEPLOYED':data.error?.code;e.status=response.status;e.recoveryAvailable=data.error?.recoveryAvailable===true;throw e;}return data;}
+async function raw(path,{method='GET',body,token,key}={}){if(!path.startsWith('/v1/'))throw Error('接口地址无效');const headers={Accept:'application/json','X-Float-Points-Precision':'2'};if(token)headers.Authorization='Bearer '+token;if(key)headers['Idempotency-Key']=key;const multipart=body instanceof FormData;if(body!==undefined&&!multipart)headers['Content-Type']='application/json';let response;try{response=await fetch(path,{method,headers,body:body===undefined?undefined:multipart?body:JSON.stringify(body),cache:'no-store',credentials:'omit',redirect:'error'});}catch{throw Error('连接失败；若已提交修改，请刷新核对结果后再重试。');}let data={};if(response.status!==204){try{data=await response.json();}catch{throw Error('服务返回了无法读取的结果，请重新检查连接。');}}if(!response.ok){const missingModelService=response.status===404&&['/v1/models/catalog','/v1/admin/coze-models'].includes(path.split('?')[0]);const e=Error(missingModelService?'当前后台尚未提供模型目录，配套模型服务还未上线':data.error?.message||'服务请求失败');e.code=missingModelService?'MODEL_SERVICE_NOT_DEPLOYED':data.error?.code;e.status=response.status;e.recoveryAvailable=data.error?.recoveryAvailable===true;throw e;}return data;}
 async function refresh(savedEpoch,attempted){if(!session||epoch!==savedEpoch)throw Error('账号已切换，请重新操作');if(session.accessToken!==attempted)return;if(!refreshFlight){const token=session.refreshToken;refreshFlight=(async()=>{try{const next=await raw('/v1/auth/refresh',{method:'POST',body:{refreshToken:token,clientId:'web'}});if(epoch!==savedEpoch)throw Error('账号已切换');session=next;accountHeader();}catch(e){if(epoch===savedEpoch)clearSession();throw e;}finally{refreshFlight=null;}})();}await refreshFlight;}
 function rejectRevokedSession(error,savedEpoch,attempted){
   if(epoch!==savedEpoch||!session)return;
@@ -401,7 +402,7 @@ manageAnnouncements:async alive=>{if(!alive())return;heading('公告管理','');
 audit:async alive=>{if(!alive())return;heading('操作日志','');await paged('/v1/admin/audit',['时间','操作者','操作','对象','摘要'],i=>[date(i.createdAt),i.actorId||'服务端 CLI',i.action,i.targetId,i.details]);}
 };
 function membership(u){const type=select('会员类型',{free:'Free',sponsor:'赞助版'},u.membership),expiry=field('赞助到期时间（留空为长期）','datetime-local',u.membershipExpiresAt?localDate(u.membershipExpiresAt):''),reason=field('修改原因');dialog('修改会员：'+u.phoneNumber,[type.node,expiry.node,reason.node],'保存会员',async operationKey=>{await mutation(`/v1/admin/users/${u.userId}/membership`,{membership:inputValue(type),membershipExpiresAt:inputValue(expiry)?new Date(inputValue(expiry)).toISOString():null,expectedRevision:u.revision,reason:inputValue(reason)},'POST',operationKey);notify('会员状态已更新');await show('users');});}
-function adjustPoints(u){const delta=field('增减点数','number','','正数增加，负数扣除。'),reason=field('调整原因');dialog('调整点数：'+u.phoneNumber,[el('p',{},`总额${u.pointsBalance}点，可用${u.pointsAvailable}点，预留${u.pointsReserved}点。`),delta.node,reason.node],'确认调整',async operationKey=>{await mutation(`/v1/admin/users/${u.userId}/points-adjustments`,{delta:number(delta),expectedRevision:u.revision,reason:inputValue(reason)},'POST',operationKey);notify('点数已调整并记录流水');await show('users');});}
+function adjustPoints(u){const delta=field('增减点数','number','','正数增加，负数扣除；最多两位小数。'),reason=field('调整原因');delta.input.step='0.01';dialog('调整点数：'+u.phoneNumber,[el('p',{},`总额${u.pointsBalance}点，可用${u.pointsAvailable}点，预留${u.pointsReserved}点。`),delta.node,reason.node],'确认调整',async operationKey=>{await mutation(`/v1/admin/users/${u.userId}/points-adjustments`,{delta:pointNumber(delta),expectedRevision:u.revision,reason:inputValue(reason)},'POST',operationKey);notify('点数已调整并记录流水');await show('users');});}
 async function userLedger(u){const r=await api(`/v1/admin/users/${u.userId}/points-ledger?limit=50`);readDialog(u.phoneNumber+' · 最近50条流水',table(['时间','变动','余额','原因'],r.items.map(i=>[date(i.createdAt),i.delta,i.balanceAfter,i.reason])));}
 function userStatus(u){const reason=field('操作原因');dialog((u.disabled?'启用':'禁用')+'用户：'+u.phoneNumber,[el('p',{class:'muted'},u.disabled?'启用后用户需要重新登录。':'禁用会立即撤销全部登录会话。离线浮窗最迟在现有许可到期时停用。'),reason.node],'确认'+(u.disabled?'启用':'禁用'),async operationKey=>{await mutation(`/v1/admin/users/${u.userId}/status`,{disabled:!u.disabled,expectedRevision:u.revision,reason:inputValue(reason)},'POST',operationKey);await show('users');});}
 function revoke(u){const reason=field('操作原因');dialog('强制退出：'+u.phoneNumber,[reason.node],'撤销全部会话',async operationKey=>{await mutation(`/v1/admin/users/${u.userId}/revoke-sessions`,{reason:inputValue(reason)},'POST',operationKey);notify('该账号全部会话已撤销');});}
@@ -424,22 +425,24 @@ async function modelForm(m){
   const instruction=el('p',{class:'muted'});
   let available=[],loading=false,closed=false,box;
   key.input.autocomplete='off';key.input.spellcheck=false;key.input.dataset.modelSecret='';
+  price.input.step='0.01';
   const isCoze=()=>inputValue(execution)==='coze';
-  const usesEnvironmentKey=()=>inputValue(provider)==='baichuan';
+  const environmentProvider=()=>modelProviders.find(p=>p.id===inputValue(provider));
+  const usesEnvironmentKey=()=>inputValue(provider)==='baichuan'||!!environmentProvider()?.environmentModels?.[inputValue(binding)];
   const cozeName=item=>item.show_name||item.model_name||item.model_id;
   function updateSubmit(){const submit=box?.querySelector('button[type="submit"]');if(submit)submit.disabled=isCoze()&&(loading||!inputValue(binding)||!available.some(item=>item.model_id===inputValue(cozeModel)));}
   function selection(){
     const item=catalog.items.find(item=>item.key===inputValue(binding));
     if(item){provider.input.value=item.provider;price.input.value=item.pointsPerCall;if(!isCoze()&&!inputValue(name))name.input.value=item.name;}
     const environment=usesEnvironmentKey();
-    if(environment){execution.input.value='official';key.input.value='';remove.checked=false;tokens.input.value=2048;if(item){model.input.value=item.key==='baichuan-m2'?'Baichuan-M2':'Baichuan-M3';name.input.value=item.name;}}
+    if(environment){execution.input.value='official';key.input.value='';remove.checked=false;tokens.input.value=2048;if(item){model.input.value=environmentProvider().environmentModels[item.key];name.input.value=item.name;}}
     const coze=isCoze();
     provider.input.disabled=!!item;price.input.readOnly=!!item;execution.input.disabled=environment;
     model.node.hidden=coze;key.node.hidden=coze||environment;metadataPanel.hidden=!coze;
     name.input.readOnly=coze;model.input.readOnly=environment;tokens.input.readOnly=environment;
     if(removeNode)removeNode.hidden=coze||environment;
-    instruction.textContent=environment?'百川仅从 Coze 服务端 BAICHUAN_API_KEY 环境密钥读取；生成预算固定 2048、思考预算固定 1024。保存配置后需真实测试通过再启用。'
-      :coze?'使用 Coze 项目授权，无需供应商 Key。选择产品计点档位并核对实际型号；输出预算只校验返回用量，不能限制平台生成。测试成功后再启用。':'选择产品型号后使用固定 1／2 点档位。填写供应商实际模型 ID，保存密钥后测试通过并启用。';
+    instruction.textContent=environment?'仅从 Coze 服务端 '+environmentProvider().environmentVariable+' 环境密钥读取；基础输出上限固定 2048。百川 M2/M3 思考预算为 1024；4-Air 不传思考参数；DeepSeek Light 关闭思考，Medium/High 对应官方 low/high，开启时思考与答案共用 4096 上限，覆盖基础短答预算。保存后需真实测试通过再启用。'
+      :coze?'使用 Coze 项目授权，无需供应商 Key。选择产品计点档位并核对实际型号；输出预算只校验返回用量，不能限制平台生成。测试成功后再启用。':'选择产品型号后使用其固定计点价格。填写供应商实际模型 ID，保存密钥后测试通过并启用。';
     updateSubmit();
   }
   function selectedModel(){const selected=available.find(item=>item.model_id===inputValue(cozeModel));if(selected)name.input.value=cozeName(selected);updateSubmit();}
@@ -457,7 +460,7 @@ async function modelForm(m){
   box=dialog(m?'编辑模型':'添加模型',[execution.node,binding.node,provider.node,name.node,model.node,metadataPanel,key.node,removeNode,el('div',{class:'grid'},price.node,tokens.node,timeout.node),instruction],'保存配置',async operationKey=>{
     const coze=isCoze(),selected=available.find(item=>item.model_id===inputValue(cozeModel));
     if(coze&&(!inputValue(binding)||!selected))throw Error('请读取真实型号并选择产品计点档位');
-    const p=inputValue(provider),body={execution:inputValue(execution),provider:p,catalogKey:inputValue(binding)||null,displayName:coze?cozeName(selected):inputValue(name),modelId:coze?selected.model_id:inputValue(model),baseUrl:coze?null:modelProviders.find(x=>x.id===p).baseUrl,enabled:false,capabilities:['text'],maxOutputTokens:number(tokens),timeoutMs:number(timeout),pointsPerCall:number(price)};
+    const p=inputValue(provider),body={execution:inputValue(execution),provider:p,catalogKey:inputValue(binding)||null,displayName:coze?cozeName(selected):inputValue(name),modelId:coze?selected.model_id:inputValue(model),baseUrl:coze?null:modelProviders.find(x=>x.id===p).baseUrl,enabled:false,capabilities:['text'],maxOutputTokens:number(tokens),timeoutMs:number(timeout),pointsPerCall:pointNumber(price)};
     if(!coze&&!usesEnvironmentKey()&&inputValue(key))body.apiKey=inputValue(key);if(!coze&&!usesEnvironmentKey()&&remove.checked)body.removeKey=true;if(m)body.expectedRevision=m.revision;
     try{await mutation('/v1/admin/models'+(m?'/'+m.id:''),body,m?'PATCH':'POST',operationKey);key.input.value='';notify('模型已保存；测试通过并启用后可供用户调用。');await show('models');}
     finally{key.input.value='';delete body.apiKey;}
