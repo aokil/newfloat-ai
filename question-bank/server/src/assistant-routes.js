@@ -5,6 +5,7 @@ import {modelSupportsImages} from './ai-image.js';
 import {assistantRequest} from './assistant-protocol.js';
 import {officialAssistantCompletion} from './assistant-model-transport.js';
 import {officialAssistantChat} from './assistant-model-transport.js';
+import {assistantThinkingProfile} from './assistant-thinking.js';
 import {once} from 'node:events';
 
 // This explicitly requested temporary path is admin-only and never touches the points ledger.
@@ -34,9 +35,10 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
       if(!reason)try{secretFor(binding);}catch{reason='MODEL_KEY_NOT_CONFIGURED';}
       const supportsImages=!!binding&&binding.config.execution!=='coze'&&modelSupportsImages(binding.config.modelId);
       return {key:item.key,name:binding?.config.execution==='coze'?binding.config.displayName:item.name,provider:item.provider,
+        modelId:binding?.config.modelId??null,thinkingProfile:assistantThinkingProfile(binding?.config??{provider:item.provider}),
         available:!reason,unavailableReason:reason,supportsImages,capabilities:supportsImages?['text','image']:['text'],
         toolsVerified:false,toolsStatus:'unverified'};
-    }),testing:{adminOnly:true,pointsCharged:0}};
+    }),protocolVersion:2,sessionHistorySupported:true,thinkingConfigVersion:1,testing:{adminOnly:true,pointsCharged:0}};
   });
   app.post('/v1/assistant/plan',{preHandler:admin,bodyLimit:4*1024*1024,
     config:{rateLimit:rateLimits?{max:20,timeWindow:'1 minute'}:false}},async(req,reply)=>{
@@ -48,12 +50,13 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
     if((request.image||request.visionEnabled)&&!modelSupportsImages(binding.config.modelId))throw new ApiError(422,'MODEL_IMAGE_UNSUPPORTED','当前内置型号不支持图片输入，请关闭视觉辅助或更换模型');
     const key=secretFor(binding),owner=req.auth.user_id,requestKey=owner+':'+request.requestId;
     const digest=sha256(JSON.stringify({modelKey:request.modelKey,mode:request.mode,messages:request.messages,
-      visionEnabled:request.visionEnabled,revision:binding.row.revision,keyFingerprint:sha256(key)}));
+      visionEnabled:request.visionEnabled,thinking:request.thinking,maxOutputTokens:request.maxOutputTokens,expectedModelId:request.expectedModelId,
+      revision:binding.row.revision,keyFingerprint:sha256(key)}));
     prune();
     const previous=cache.get(requestKey);
     if(previous){
       if(previous.digest!==digest)throw new ApiError(409,'ASSISTANT_IDEMPOTENCY_CONFLICT','同一助手请求编号不能用于不同内容');
-      return previous.promise;
+      const result=await previous.promise;await admin(req);return result;
     }
     const now=Date.now(),times=(recent.get(owner)||[]).filter(at=>at>now-60000);
     if(rateLimits&&times.length>=20)throw new ApiError(429,'ASSISTANT_RATE_LIMITED','助手调用过于频繁，请稍后重试');
@@ -93,9 +96,12 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
     if(!item)throw new ApiError(400,'ASSISTANT_MODEL_INVALID','请选择内置目录中的模型');
     const reason=unavailable(item,binding);
     if(reason)throw new ApiError(422,reason,reason==='MODEL_ASSISTANT_UNSUPPORTED'?'该Coze通道暂不支持本助手对话，请选择官方通道或自定义模型':'当前内置模型尚未就绪');
-    if(request.image&&!modelSupportsImages(binding.config.modelId))throw new ApiError(422,'MODEL_IMAGE_UNSUPPORTED','该模型不支持附件图片');
+    if((request.image||request.availableTools?.includes('take_screenshot'))&&!modelSupportsImages(binding.config.modelId))
+      throw new ApiError(422,'MODEL_IMAGE_UNSUPPORTED','该模型不支持本次图片或实时截图能力');
     const key=secretFor(binding),owner=req.auth.user_id,requestKey=owner+':'+request.requestId;
-    const digest=sha256(JSON.stringify({modelKey:request.modelKey,mode:'chat',messages:request.messages,
+    const digest=sha256(JSON.stringify({modelKey:request.modelKey,mode:'chat',protocolVersion:request.protocolVersion,
+      availableTools:request.availableTools,visionEnabled:request.visionEnabled,messages:request.messages,
+      thinking:request.thinking,maxOutputTokens:request.maxOutputTokens,expectedModelId:request.expectedModelId,
       revision:binding.row.revision,keyFingerprint:sha256(key)}));
     prune();
     const previous=cache.get(requestKey);
@@ -127,18 +133,25 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
     try{
       const result=await officialAssistantChat(binding.config,key,request,controller.signal,async text=>{
         await event({choices:[{index:0,delta:{content:text},finish_reason:null}]});
+      },async reasoning=>{
+        await event({choices:[{index:0,delta:{reasoning_content:reasoning},finish_reason:null}]});
+      },async configuration=>{
+        await event({configuration});
       });
       // A native phone signal is withheld until the current session is checked again.
       await admin(req);
       if(controller.signal.aborted)throw new ApiError(499,'ASSISTANT_REQUEST_CANCELLED','对话已取消');
       const choice=result.choices[0];
-      await event({choices:[{index:0,delta:{...(choice.message.tool_calls?{tool_calls:choice.message.tool_calls}:{})},finish_reason:choice.finish_reason}],testing:result.testing});
+      if(request.protocolVersion===2)result.protocolVersion=2;
+      await event({choices:[{index:0,delta:{...(choice.message.tool_calls?{tool_calls:choice.message.tool_calls}:{})},finish_reason:choice.finish_reason}],
+        ...(request.protocolVersion===2?{protocolVersion:2}:{}),...(result.tool_validation?{tool_validation:result.tool_validation}:{}),
+        ...(result.configuration?{configuration:result.configuration}:{}),testing:result.testing});
       entry.pending=false;resolvePending(result);
       reply.raw.end('data: [DONE]\n\n');
     }catch(error){
       cache.delete(requestKey);rejectPending(error);
       if(!reply.raw.destroyed&&!controller.signal.aborted){
-        reply.raw.end(`data: ${JSON.stringify({error:{code:error instanceof ApiError?error.code:'MODEL_CHAT_FAILED',message:'对话连接中断，请重试'}})}\n\n`);
+        reply.raw.end(`data: ${JSON.stringify({error:{code:error instanceof ApiError?error.code:'MODEL_CHAT_FAILED',message:error instanceof ApiError?error.message:'对话连接中断，请重试'}})}\n\n`);
       }
     }finally{
       active--;const count=(pending.get(owner)||1)-1;
