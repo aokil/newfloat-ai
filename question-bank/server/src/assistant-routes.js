@@ -9,14 +9,13 @@ import {assistantThinkingProfile} from './assistant-thinking.js';
 import {once} from 'node:events';
 
 // This explicitly requested temporary path is admin-only and never touches the points ledger.
-export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApiKey=null,deepseekApiKey=null,rateLimits=true}){
-  const cache=new Map(),pending=new Map(),recent=new Map(),controllers=new Set();let active=0;
+export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApiKey=null,deepseekApiKey=null}){
+  const cache=new Map(),pending=new Map(),controllers=new Set();let active=0;
   const ttl=5*60*1000,maxCache=128;
   const admin=async req=>{await auth(req);if(req.auth.role!=='admin')throw new ApiError(403,'ASSISTANT_ADMIN_ONLY','内置助手当前仅供管理员测试');};
   const prune=()=>{
     const now=Date.now();
     for(const [key,value] of cache)if(value.expires<=now&&!value.pending)cache.delete(key);
-    for(const [key,value] of recent)if(value.at(-1)<=now-60000)recent.delete(key);
   };
   const unavailable=(item,binding)=>modelUnavailableReason(item,binding)||
     (binding.config.execution==='coze'?'MODEL_ASSISTANT_UNSUPPORTED':null);
@@ -27,7 +26,7 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
       return key;
     }catch{throw new ApiError(503,'MODEL_KEY_NOT_CONFIGURED','内置模型密钥尚未配置或不可用');}
   };
-  app.addHook('onClose',async()=>{for(const controller of controllers)controller.abort();cache.clear();recent.clear();});
+  app.addHook('onClose',async()=>{for(const controller of controllers)controller.abort();cache.clear();});
   app.get('/v1/assistant/models',{preHandler:admin},async()=>{
     const bindings=await configuredCatalog(store);
     return {items:MODEL_CATALOG.map(item=>{
@@ -40,8 +39,10 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
         toolsVerified:false,toolsStatus:'unverified'};
     }),protocolVersion:2,sessionHistorySupported:true,thinkingConfigVersion:1,testing:{adminOnly:true,pointsCharged:0}};
   });
+  // A single task can legitimately make many sequential model decisions. Do not inherit
+  // the HTTP rate plugin's global limit; concurrent/pending work is still bounded below.
   app.post('/v1/assistant/plan',{preHandler:admin,bodyLimit:4*1024*1024,
-    config:{rateLimit:rateLimits?{max:20,timeWindow:'1 minute'}:false}},async(req,reply)=>{
+    config:{rateLimit:false}},async(req,reply)=>{
     const request=assistantRequest(req.body),item=catalogEntry(request.modelKey),bindings=await configuredCatalog(store),binding=bindings.get(request.modelKey);
     if(request.mode==='chat')throw new ApiError(400,'ASSISTANT_REQUEST_INVALID','普通对话请使用对话生成接口');
     if(!item)throw new ApiError(400,'ASSISTANT_MODEL_INVALID','请选择内置目录中的模型');
@@ -58,14 +59,12 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
       if(previous.digest!==digest)throw new ApiError(409,'ASSISTANT_IDEMPOTENCY_CONFLICT','同一助手请求编号不能用于不同内容');
       const result=await previous.promise;await admin(req);return result;
     }
-    const now=Date.now(),times=(recent.get(owner)||[]).filter(at=>at>now-60000);
-    if(rateLimits&&times.length>=20)throw new ApiError(429,'ASSISTANT_RATE_LIMITED','助手调用过于频繁，请稍后重试');
+    const now=Date.now();
     if(active>=8||(pending.get(owner)||0)>=2)throw new ApiError(429,'ASSISTANT_BUSY','助手已有请求正在处理，请稍后重试');
     if(cache.size>=maxCache){
       const oldest=[...cache].find(([,entry])=>!entry.pending);
       if(oldest)cache.delete(oldest[0]);else throw new ApiError(429,'ASSISTANT_BUSY','助手请求队列已满，请稍后重试');
     }
-    recent.set(owner,[...times,now]);
     const controller=new AbortController();controllers.add(controller);active++;pending.set(owner,(pending.get(owner)||0)+1);
     const disconnected=()=>{if(!reply.raw.writableEnded)controller.abort();};
     req.raw.once('aborted',disconnected);reply.raw.once('close',disconnected);
@@ -89,7 +88,7 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
   });
 
   app.post('/v1/assistant/chat',{preHandler:admin,bodyLimit:4*1024*1024,
-    config:{rateLimit:rateLimits?{max:20,timeWindow:'1 minute'}:false}},async(req,reply)=>{
+    config:{rateLimit:false}},async(req,reply)=>{
     const request=assistantRequest(req.body);
     if(request.mode!=='chat')throw new ApiError(400,'ASSISTANT_REQUEST_INVALID','对话接口只接受chat请求');
     const item=catalogEntry(request.modelKey),bindings=await configuredCatalog(store),binding=bindings.get(request.modelKey);
@@ -109,14 +108,12 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
       if(previous.digest!==digest)throw new ApiError(409,'ASSISTANT_IDEMPOTENCY_CONFLICT','同一请求编号不能用于不同对话');
       const result=await previous.promise;await admin(req);return result;
     }
-    const now=Date.now(),times=(recent.get(owner)||[]).filter(at=>at>now-60000);
-    if(rateLimits&&times.length>=20)throw new ApiError(429,'ASSISTANT_RATE_LIMITED','助手调用过于频繁，请稍后重试');
+    const now=Date.now();
     if(active>=8||(pending.get(owner)||0)>=2)throw new ApiError(429,'ASSISTANT_BUSY','已有对话正在生成，请稍后重试');
     if(cache.size>=maxCache){
       const oldest=[...cache].find(([,entry])=>!entry.pending);
       if(oldest)cache.delete(oldest[0]);else throw new ApiError(429,'ASSISTANT_BUSY','助手请求队列已满');
     }
-    recent.set(owner,[...times,now]);
     const controller=new AbortController();controllers.add(controller);active++;pending.set(owner,(pending.get(owner)||0)+1);
     const disconnected=()=>{if(!reply.raw.writableEnded)controller.abort();};
     req.raw.once('aborted',disconnected);reply.raw.once('close',disconnected);
