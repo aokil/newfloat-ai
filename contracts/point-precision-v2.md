@@ -11,7 +11,7 @@
 | deepseek-pro | deepseek-v4-pro | 2 点 |
 
 - 百川为一个品牌组，分“通用快速”和“医学推理”，共用说明。4-Air 说明“通用快速模型，正确率有待考量”；M2/M3 维持 1/2 点、医学说明及固定预算。
-- 2026-10-31 用户最新映射覆盖先前选择：App内置DeepSeek与型号同一行提供思考菜单，向上展开并直接选择，按账号保存。**Light＝关闭思考，Medium＝官方low，High＝官方high**，默认Light；不展示max。菜单及启用反馈提示可能等待更久，替代原独立开关/二次确认；按用户后续要求不在该界面显示token预算说明，实际预算规则如下。
+- 2026-10-31 用户最新映射覆盖先前选择：App内置DeepSeek与型号同一行提供思考菜单，向上展开并直接选择，按账号保存。**Light＝关闭思考，Medium＝官方low，High＝官方high**，新默认Medium；已保存档位与旧Boolean的明确选择保留，不展示max。菜单及启用反馈提示可能等待更久，替代原独立开关/二次确认；按用户后续要求不在该界面显示token预算说明，实际预算规则如下。
 - Medium/High 发送 `thinking:{type:"enabled"}`、对应 `reasoning_effort:"low"/"high"`，固定 `max_tokens:4096`；Light 发送 disabled，短答案沿既有预算且不超过2048。4096是思考和最终答案合计上限，不是保证产出答案。预算用尽、无完整答案、无完整用量时失败释放平台预占，不自动重试；供应商仍可能计费。
 - 沿原只给答案提示词、完整答案和成功回执后展示、非流式。DeepSeek 原自带 Key 入口保留，档位仅作用于新增两个内置型号。导题批次和未完成请求锁定档位，查回执不会重新调用；旧Boolean偏好false迁移为Light、true迁移为High，旧未完成请求保持Boolean-only摘要。
 - `POST /v1/ai/search` 为内置DeepSeek接受可选 `reasoningEffort:"low"|"high"`；指定时隐含开启，不能与 `thinking:false` 混用。其他模型/用途或其他值返回400；强度加入请求摘要，复用幂等key改变强度返回409。旧 `thinking:true` 且未传强度默认high、保留旧摘要；完成回执的model可包含实际reasoningEffort。

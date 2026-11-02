@@ -13,6 +13,7 @@ import { accountInfo, points, requirePositivePoints } from './account.js';
 import { adminRoutes } from './admin-routes.js';
 import { registerAppUpdateRoutes } from './app-updates.js';
 import { aiRoutes } from './ai-routes.js';
+import { assistantRoutes } from './assistant-routes.js';
 import { registerPaymentRoutes } from './payment-routes.js';
 import { registerSessionEvents } from './session-events.js';
 import { communityRoutes } from './community-routes.js';
@@ -769,6 +770,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
     adminRoutes(app, { store, auth, admin, idem, integer, modelMasterKey, baichuanApiKey, deepseekApiKey, modelTransport, cozeBridge });
     communityRoutes(app,{store,auth,admin,idem,integer});
     await aiRoutes(app, { store, auth, modelMasterKey, baichuanApiKey, deepseekApiKey, aiTransport, cozeBridge, rateLimits });
+    await assistantRoutes(app, { store, auth, modelMasterKey, baichuanApiKey, deepseekApiKey, rateLimits });
     await registerPaymentRoutes(app, { store, auth, payment: paymentTransport });
     registerAppUpdateRoutes(app, { directory: appUpdateDirectory });
     await app.register(staticFiles, { root: fileURLToPath(new URL('../public/', import.meta.url)), prefix: '/', index: ['index.html'], dotfiles: 'deny' });

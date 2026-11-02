@@ -22,7 +22,8 @@ window.FloatWorkspace = function (ctx) {
     preferenceUser = id; clearModelKey(); catalog = null; history = [];
     try { prefs = JSON.parse(localStorage.getItem(prefsKey()) || '{}'); } catch { prefs = {}; }
     if (!prefs || typeof prefs !== 'object' || Array.isArray(prefs)) prefs = {};
-    if (!['off', 'low', 'high'].includes(prefs.deepseekEffort)) prefs.deepseekEffort = prefs.deepseekThinking === true ? 'high' : 'off';
+    if (!['off', 'low', 'high'].includes(prefs.deepseekEffort)) prefs.deepseekEffort =
+      typeof prefs.deepseekThinking === 'boolean' ? (prefs.deepseekThinking ? 'high' : 'off') : 'low';
     if (!['light', 'dark', 'system'].includes(prefs.appearance)) prefs.appearance = 'system';
     if (!avatars.some(a => a.id === prefs.avatarId)) savePreference('avatarId', avatars[Math.floor(Math.random() * avatars.length)].id);
     applyTheme();

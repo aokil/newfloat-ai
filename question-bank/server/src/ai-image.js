@@ -14,12 +14,14 @@ export function modelSupportsImages(modelId,inputTypes){
   return DOCUMENTED_IMAGE_MODELS.has(modelId);
 }
 const invalid=()=>{throw new ApiError(400,'INVALID_AI_IMAGE','图片无效或超过大小限制');};
-export function validateAiImage(value){
+export function validateAiImage(value,{maxBytes=AI_IMAGE_LIMIT}={}){
+  // Assistant screenshots may use a larger explicit budget; ordinary search stays at 1 MiB.
+  if(!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>1536*1024)invalid();
   if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!['mimeType','data'].includes(key))||
-    !['image/jpeg','image/png'].includes(value.mimeType)||typeof value.data!=='string'||value.data.length>Math.ceil(AI_IMAGE_LIMIT/3)*4||
+    !['image/jpeg','image/png'].includes(value.mimeType)||typeof value.data!=='string'||value.data.length>Math.ceil(maxBytes/3)*4||
     !/^[A-Za-z0-9+/]+={0,2}$/u.test(value.data))invalid();
   const bytes=Buffer.from(value.data,'base64');
-  if(!bytes.length||bytes.length>AI_IMAGE_LIMIT||bytes.toString('base64')!==value.data)invalid();
+  if(!bytes.length||bytes.length>maxBytes||bytes.toString('base64')!==value.data)invalid();
   let width,height;
   if(value.mimeType==='image/png'){
     if(bytes.length<33||bytes.subarray(0,8).toString('hex')!=='89504e470d0a1a0a'||bytes.toString('ascii',12,16)!=='IHDR')invalid();
