@@ -21,7 +21,18 @@ export function assistantThinkingProfile(config={}){
   const provider=config.provider??'',modelId=config.modelId??'';
   const profile=(style,{modes=toggle,efforts=defaults,defaultMode='enabled',defaultEffort='provider_default',fixed:isFixed=false,reason=''}={})=>
     ({version:1,id:`${provider}:${modelId}:v1`,provider,modelId,modes:[...modes],efforts:[...efforts],fixed:isFixed,reason,defaultMode,defaultEffort,style,maxOutputTokensLimit:outputLimit(provider,modelId)});
-  if(config.execution==='coze')return {version:1,id:'unknown:v1',provider,modelId,modes:[...defaults],efforts:[...defaults],fixed:false,reason:'当前Coze通道尚未提供助手思考及原生工具协议',defaultMode:'provider_default',defaultEffort:'provider_default',style:'unknown',maxOutputTokensLimit:null};
+  if(config.execution==='coze'){
+    // Explicit Coze gateway IDs, not display names or billing/catalog aliases.
+    const toggles={doubao:['doubao-seed-2-0-pro-260215','doubao-seed-2-0-lite-260215','doubao-seed-2-0-mini-260215'],
+      glm:['glm-5-0-260211','glm-5-turbo-260316','glm-4-7-251222'],qwen:['qwen-3-5-plus-260215']};
+    const isFixed=provider==='minimax'&&has(modelId,['minimax-m2-5-260212','minimax-m2-7-260318']);
+    return {version:1,id:`coze:${provider}:${modelId}:json-v1`,provider,modelId,
+      modes:[...(isFixed?fixed:has(modelId,toggles[provider]??[])?toggle:defaults)],efforts:[...defaults],fixed:isFixed,
+      reason:isFixed?'该实际型号固定思考；采用Coze JSON操作规划，不冒充原生工具调用':
+        '采用Coze JSON操作规划；按明确型号及公开SDK参数配置thinking，网关是否接受以真实响应为准；其余仅接口默认，暂不发送档位参数',
+      defaultMode:isFixed?'enabled':'provider_default',defaultEffort:'provider_default',
+      style:isFixed?'coze_json_fixed':'coze_json',maxOutputTokensLimit:null};
+  }
   if(provider==='deepseek'&&has(modelId,['deepseek-flash','deepseek-v4-pro']))return profile('deepseek',{efforts:variableEfforts,defaultEffort:'high'});
   if(provider==='qwen'&&has(modelId,['qwen3.5-plus','qwen3.5-plus-2026-02-15','qwen3.5-plus-2026-04-20','qwen3.5-flash','qwen3.5-flash-2026-02-23']))return profile('qwen');
   if(provider==='qwen'&&has(modelId,['qwen-plus','qwen-plus-latest','qwen-plus-2025-04-28','qwen-flash','qwen-flash-2025-07-28']))return profile('qwen',{defaultMode:'disabled'});
@@ -59,6 +70,8 @@ export function applyAssistantThinking(config,request,body){
   if(!profile.efforts.includes(effort))fail(`该实际型号不支持所选思考档位：${effort}。${profile.reason}`);
   if(mode==='disabled'&&effort!=='provider_default')fail('关闭思考时不能同时指定思考档位，请改为默认档位');
   if(['deepseek','glm','doubao'].includes(profile.style)&&mode!=='provider_default')body.thinking={type:mode};
+  if(profile.style==='coze_json'&&mode!=='provider_default')body.thinking={type:mode};
+  if(profile.style==='coze_json_fixed')body.thinking={type:'enabled'};
   if(profile.style==='qwen'&&mode!=='provider_default')body.enable_thinking=mode==='enabled';
   if(['minimax_fixed','minimax_adaptive'].includes(profile.style)){
     body.reasoning_split=true;
@@ -71,7 +84,7 @@ export function applyAssistantThinking(config,request,body){
   delete body.max_tokens;delete body.max_completion_tokens;
   if(budget>0){
     if(profile.maxOutputTokensLimit!==null&&budget>profile.maxOutputTokensLimit)fail(`所选输出预算超过该实际型号已核对的上限 ${profile.maxOutputTokensLimit} token`);
-    body[(['minimax','doubao'].includes(profile.provider)&&profile.style!=='unknown')?'max_completion_tokens':'max_tokens']=budget;
+    body[(config.execution!=='coze'&&['minimax','doubao'].includes(profile.provider)&&profile.style!=='unknown')?'max_completion_tokens':'max_tokens']=budget;
   }
   if(body.tools?.length)body.tool_choice='auto';else delete body.tool_choice;
   const effectiveMode=mode==='provider_default'?profile.defaultMode:mode;

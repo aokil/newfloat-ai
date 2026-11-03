@@ -14,6 +14,7 @@ import { adminRoutes } from './admin-routes.js';
 import { registerAppUpdateRoutes } from './app-updates.js';
 import { aiRoutes } from './ai-routes.js';
 import { assistantRoutes } from './assistant-routes.js';
+import { assistantErrorDiagnostic, assistantBackendDiagnostic } from './assistant-provider-errors.js';
 import { registerPaymentRoutes } from './payment-routes.js';
 import { registerSessionEvents } from './session-events.js';
 import { communityRoutes } from './community-routes.js';
@@ -112,8 +113,15 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         if (status >= 500)
             app.log.error({ code, requestId: request.id }, 'Request failed');
         // Parser errors can embed fragments of malformed JSON, including passwords or API Keys.
-        const publicMessage = error instanceof ApiError ? error.message : status >= 500 ? '服务暂不可用' : status === 413 ? '请求内容超过处理范围' : status === 429 ? '请求过于频繁' : '请求格式无效';
-        reply.code(status).send({ error: { code, message: publicMessage, requestId: request.id, retryable: status === 429 || status >= 500,
+        let publicMessage = error instanceof ApiError ? error.message : status >= 500 ? '服务暂不可用' : status === 413 ? '请求内容超过处理范围' : status === 429 ? '请求过于频繁' : '请求格式无效';
+        let assistantDiagnostic=assistantErrorDiagnostic(error);
+        if(typeof request.url==='string'&&request.url.split('?')[0].startsWith('/v1/assistant/')&&!assistantDiagnostic){
+            assistantDiagnostic=assistantBackendDiagnostic(error,{status,code});
+            if(!(error instanceof ApiError)&&status>=500)publicMessage=`业务后台处理请求时发生异常（${assistantDiagnostic.exception_type}），尚未确定具体原因`;
+            publicMessage+=`。后台追查编号：${assistantDiagnostic.request_id}`;
+        }
+        reply.code(status).send({ error: { code, message: publicMessage, requestId: request.id, retryable: assistantDiagnostic?.retryable ?? (status === 429 || status >= 500),
+                ...(assistantDiagnostic ? { diagnostic: assistantDiagnostic } : {}),
                 ...(error instanceof ApiError && error.details?.recoveryAvailable === true ? { recoveryAvailable: true } : {}) } });
     });
     const auth = async (req) => { req.auth = await authenticate(store, req); await androidReleaseCampaign?.requireSupported(req,req.auth.client_id); };
@@ -770,7 +778,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
     adminRoutes(app, { store, auth, admin, idem, integer, modelMasterKey, baichuanApiKey, deepseekApiKey, modelTransport, cozeBridge });
     communityRoutes(app,{store,auth,admin,idem,integer});
     await aiRoutes(app, { store, auth, modelMasterKey, baichuanApiKey, deepseekApiKey, aiTransport, cozeBridge, rateLimits });
-    await assistantRoutes(app, { store, auth, modelMasterKey, baichuanApiKey, deepseekApiKey, rateLimits });
+    await assistantRoutes(app, { store, auth, modelMasterKey, baichuanApiKey, deepseekApiKey, rateLimits, cozeBridge });
     await registerPaymentRoutes(app, { store, auth, payment: paymentTransport });
     registerAppUpdateRoutes(app, { directory: appUpdateDirectory });
     await app.register(staticFiles, { root: fileURLToPath(new URL('../public/', import.meta.url)), prefix: '/', index: ['index.html'], dotfiles: 'deny' });

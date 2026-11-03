@@ -192,11 +192,11 @@ function authenticationHeaders(request: Request): Credentials | undefined {
   return { key, timestamp, nonce, signature };
 }
 
-function authenticate(request: Request, credentials: Credentials, rawBody: Uint8Array): boolean {
+function authenticate(request: Request, credentials: Credentials, rawBody: Uint8Array, path = BRIDGE_PATH): boolean {
   const now = Date.now();
   if (Math.abs(now - Number(credentials.timestamp)) > 60_000) return false;
   const digest = createHash('sha256').update(rawBody).digest('hex');
-  const canonical = `${request.method}\n${BRIDGE_PATH}\n${credentials.timestamp}\n${credentials.nonce}\n${digest}`;
+  const canonical = `${request.method}\n${path}\n${credentials.timestamp}\n${credentials.nonce}\n${digest}`;
   const expected = createHmac('sha256', credentials.key).update(canonical).digest();
   const supplied = Buffer.from(credentials.signature, 'hex');
   if (supplied.byteLength !== expected.byteLength || !timingSafeEqual(supplied, expected)) return false;
@@ -221,9 +221,9 @@ async function deadline<T>(operation: Promise<T>, expiresAt: number, error: Brid
   }
 }
 
-async function readRawBody(request: Request): Promise<Uint8Array> {
+async function readRawBody(request: Request, limit = BODY_LIMIT): Promise<Uint8Array> {
   const length = request.headers.get('content-length');
-  if (length !== null && (!/^\d+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) > BODY_LIMIT)) {
+  if (length !== null && (!/^\d+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) > limit)) {
     throw new BridgeError(413, 'REQUEST_TOO_LARGE', '请求内容过大');
   }
   if (!request.body) return new Uint8Array();
@@ -236,7 +236,7 @@ async function readRawBody(request: Request): Promise<Uint8Array> {
       const part = await deadline(reader.read(), expiresAt, new BridgeError(408, 'REQUEST_TIMEOUT', '请求读取超时'));
       if (part.done) break;
       total += part.value.byteLength;
-      if (total > BODY_LIMIT) throw new BridgeError(413, 'REQUEST_TOO_LARGE', '请求内容过大');
+      if (total > limit) throw new BridgeError(413, 'REQUEST_TOO_LARGE', '请求内容过大');
       parts.push(part.value);
     }
   } catch (error: unknown) {
@@ -570,6 +570,36 @@ export async function cozeProjectModelMetadata(): Promise<CozeModelMetadata> {
     retrievedAt: context.credentialSource === 'workload-token' ? projectModelSnapshot.retrievedAt : null };
   serializedPayload(result);
   return result;
+}
+
+/** Dialogue-only access to the existing verified SDK identity and model allowlist. No credential leaves this process. */
+export async function cozeAssistantRuntime(modelId: string, expiresAt: number, signal: AbortSignal): Promise<{
+  config: Config; environment: ProjectEnvironment; supportsImages: boolean;
+}> {
+  if (signal.aborted) throw new BridgeError(499, 'REQUEST_CANCELLED', '请求已取消');
+  const context = await deadline(verifiedCozeProjectRuntimeContext(), expiresAt,
+    new BridgeError(504, 'MODEL_TIMEOUT', 'Coze对话授权超时'));
+  const models = await availableModels(context, expiresAt);
+  const selected = models.find(model => model.model_id === modelId);
+  if (!selected) throw new BridgeError(422, 'MODEL_NOT_AVAILABLE', '所选模型未在当前Coze项目中开放');
+  if (signal.aborted) throw new BridgeError(499, 'REQUEST_CANCELLED', '请求已取消');
+  return { config: context.config, environment: context.environment,
+    supportsImages: modelSupportsImages(modelId, selected.input_types) };
+}
+
+/** Separate signed path/budget for dialogue. Legacy search/test/extract retain their original limits. */
+export async function readAuthenticatedAssistantBody(request: Request): Promise<Uint8Array | null> {
+  const path = '/internal/assistant-completion';
+  const url = new URL(request.url);
+  if (request.method !== 'POST' || url.pathname !== path || url.search) return null;
+  const credentials = authenticationHeaders(request);
+  if (!credentials) return null;
+  let raw: Uint8Array;
+  try { raw = await readRawBody(request, 4 * 1024 * 1024); } catch { return null; }
+  if (!authenticate(request, credentials, raw, path)) return null;
+  if ((request.headers.get('content-encoding') && request.headers.get('content-encoding') !== 'identity') ||
+    !/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') ?? '')) throw invalidRequest();
+  return raw;
 }
 
 /** In-process execution. Account authorization, reservations and billing remain in Fastify. */

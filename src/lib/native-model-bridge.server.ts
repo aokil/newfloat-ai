@@ -4,6 +4,8 @@ import type { AiImagePayload } from '../../question-bank/server/src/ai-image.js'
 import { cozeModelFailureCode, cozeProjectModelCompletion, cozeProjectModelMetadata,
   cozeProjectModelsReady } from './coze-llm.server';
 import type { CozeModelExecutionContext, CozeModelMetadata, CozeSearchResult, CozeTestResult, CozeExtractionResult } from './coze-llm.server';
+import {cozeProjectAssistantCompletion} from './coze-assistant.server';
+import type {CozeAssistantEmit,CozeAssistantConfigure} from '../../question-bank/server/src/coze-assistant-transport.js';
 
 type ModelConfiguration = { modelId: string; timeoutMs: number; maxOutputTokens: number };
 type CallContext = CozeModelExecutionContext & { requestId: string; image?: AiImagePayload };
@@ -13,6 +15,8 @@ export type NativeModelBridge = {
   test(model: unknown, context: unknown): Promise<CozeTestResult>;
   search(model: unknown, question: unknown, context: unknown): Promise<CozeSearchResult>;
   extract(model: unknown, image: unknown, context: unknown): Promise<CozeExtractionResult>;
+  assistant(model: unknown, request: unknown, signal: AbortSignal, onText?: CozeAssistantEmit,
+    onReasoning?: CozeAssistantEmit, onConfiguration?: CozeAssistantConfigure): Promise<Record<string,unknown>>;
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -77,6 +81,18 @@ export function nativeModelBridge(): NativeModelBridge {
   }
   return Object.freeze({
     get ready() { return cozeProjectModelsReady(); },
+    async assistant(model: unknown, request: unknown, signal: AbortSignal, onText: CozeAssistantEmit=async()=>{},
+      onReasoning: CozeAssistantEmit=async()=>{},onConfiguration: CozeAssistantConfigure=async()=>{}) {
+      if(!record(model)||model.execution!=='coze'||typeof model.provider!=='string'||typeof model.modelId!=='string')
+        throw new Error('COZE_ASSISTANT_CONFIGURATION_INVALID');
+      const result=await cozeProjectAssistantCompletion({execution:'coze',provider:model.provider,modelId:model.modelId},request,
+        {signal,onReasoning,onConfiguration});
+      if(signal.aborted)throw new Error('ASSISTANT_REQUEST_CANCELLED');
+      const choices=result.choices;
+      if(Array.isArray(choices)&&record(choices[0])&&record(choices[0].message)&&typeof choices[0].message.content==='string'&&choices[0].message.content)
+        await onText(choices[0].message.content);
+      return result;
+    },
     async metadata() {
       try {
         return await cozeProjectModelMetadata();
