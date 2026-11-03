@@ -46,7 +46,7 @@ export class SmsService {
       if(rows.some(r=>r.created_at>now-60000)||rows.filter(r=>r.created_at>now-3600000).length>=5||rows.length>=10)throw new ApiError(429,'RATE_LIMITED','验证码发送过于频繁');
       const ipCount=(await this.store.get('SELECT COUNT(*) AS n FROM sms_challenges WHERE ip_hash=? AND created_at>?',ipHash,now-3600000)).n;
       const globalCount=(await this.store.get('SELECT COUNT(*) AS n FROM sms_challenges WHERE created_at>?',now-3600000)).n;
-      if(ipCount>=20||globalCount>=100)throw new ApiError(429,'RATE_LIMITED','短信发送预算已用完，请稍后重试');
+      if(ipCount>=40||globalCount>=1000)throw new ApiError(429,'RATE_LIMITED','短信发送预算已用完，请稍后重试');
     }
   }
   async verifyInTransaction(challengeId,phone,code,options={}) {
