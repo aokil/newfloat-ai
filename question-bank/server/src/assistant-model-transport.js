@@ -7,7 +7,7 @@ import {assistantProviderDiagnostic,readAssistantProviderDiagnostic,assistantPro
 const record=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const responseError=(code,message)=>new ApiError(502,code,message);
 
-function providerBody(config,request,stream){
+export function assistantProviderBody(config,request,stream){
   const body={model:config.modelId,messages:request.messages,
     ...(request.tools.length?{tools:request.tools,parallel_tool_calls:false}:{}),
     tool_choice:stream?'auto':'required',stream,max_tokens:stream?4096:1500};
@@ -18,6 +18,7 @@ function providerBody(config,request,stream){
     else if(config.provider!=='baichuan')body.thinking={type:'disabled'};
   }
   const configuration=applyAssistantThinking(config,request,body);
+  if(stream&&config.provider==='deepseek')body.stream_options={include_usage:true};
   return {body,configuration};
 }
 
@@ -27,17 +28,17 @@ function assertProvider(config){
 }
 
 /** User-started legacy planning and probes; phone actions are never retried here. */
-export async function officialAssistantCompletion(config,apiKey,request,signal){
+export async function officialAssistantCompletion(config,apiKey,request,signal,onUsage=async()=>{}){
   assertProvider(config);
   const diagnosticContext={provider:config.provider,modelId:config.modelId,requestId:request.requestId,timeoutSeconds:request.timeoutSeconds,secret:apiKey};
-  const {body,configuration}=providerBody(config,request,false),deadline=AbortSignal.timeout(Math.min(request.timeoutSeconds*1000,120000));
+  const {body,configuration}=assistantProviderBody(config,request,false),deadline=AbortSignal.timeout(Math.min(request.timeoutSeconds*1000,120000));
   const combined=AbortSignal.any([signal,deadline]);
   const fail=error=>assistantTransportError(error,diagnosticContext,deadline.aborted);
   try{
     const response=await fetch(`${config.baseUrl}/chat/completions`,{method:'POST',redirect:'error',signal:combined,
       headers:{authorization:`Bearer ${apiKey}`,'content-type':'application/json',accept:'application/json','cache-control':'no-store'},body:JSON.stringify(body)});
     diagnosticContext.status=response.status;diagnosticContext.upstreamRequestId=assistantProviderDiagnostic(null,response.headers,apiKey).requestId;
-    if(!response.ok)throw assistantProviderError(response.status,await readAssistantProviderDiagnostic(response,apiKey),diagnosticContext);
+    if(!response.ok)throw assistantProviderError(response.status,await readAssistantProviderDiagnostic(response,apiKey,onUsage),diagnosticContext);
     if(!response.body)throw responseError('MODEL_RESPONSE_EMPTY','模型没有返回响应正文');
     diagnosticContext.phase='provider_response';
     const reader=response.body.getReader(),chunks=[];let size=0;
@@ -53,6 +54,7 @@ export async function officialAssistantCompletion(config,apiKey,request,signal){
     diagnosticContext.phase='response_parse';
     if(raw.includes(apiKey))throw responseError('MODEL_RESPONSE_SENSITIVE','模型响应包含不应公开的服务信息');
     let result;try{result=JSON.parse(raw);}catch{throw responseError('MODEL_RESPONSE_JSON_INVALID','模型未返回有效的Chat Completions JSON');}
+    if(result?.usage!==undefined&&result.usage!==null)await onUsage(result.usage,{created:result.created});
     return {...assistantResult(result,request.tools),...(configuration?{configuration:{...configuration,request_state:'provider_http_accepted',profile_source:'trusted_binding'}}:{})};
   }catch(error){
     if(signal.aborted)throw new ApiError(499,'ASSISTANT_REQUEST_CANCELLED','助手请求已取消');
@@ -61,23 +63,26 @@ export async function officialAssistantCompletion(config,apiKey,request,signal){
 }
 
 /** Stream real content/reasoning_content independently; tools wait for a valid terminal turn. */
-export async function officialAssistantChat(config,apiKey,request,signal,onText=async()=>{},onReasoning=async()=>{},onConfiguration=async()=>{}){
+export async function officialAssistantChat(config,apiKey,request,signal,onText=async()=>{},onReasoning=async()=>{},onConfiguration=async()=>{},onUsage=async()=>{}){
   assertProvider(config);
   const diagnosticContext={provider:config.provider,modelId:config.modelId,requestId:request.requestId,timeoutSeconds:request.timeoutSeconds,secret:apiKey};
-  const {body,configuration}=providerBody(config,request,true),deadline=AbortSignal.timeout(Math.min(request.timeoutSeconds*1000,120000));
+  const {body,configuration}=assistantProviderBody(config,request,true),deadline=AbortSignal.timeout(Math.min(request.timeoutSeconds*1000,120000));
   const combined=AbortSignal.any([signal,deadline]);
   const fail=error=>assistantTransportError(error,diagnosticContext,deadline.aborted);
   const normalize=request.protocolVersion===2?assistantTurnResult:assistantChatResult;
   const argumentsLimit=request.protocolVersion===2?ASSISTANT_SESSION_ARGUMENTS_LIMIT:16384;
   const responseBytesLimit=(request.protocolVersion===2?1536:512)*1024;
   const frameCharactersLimit=(request.protocolVersion===2?1024:256)*1024;
+  let usageObserved=false;
+  const observeUsage=async(value,metadata)=>{usageObserved=true;await onUsage(value,metadata);};
   try{
     const send=()=>fetch(`${config.baseUrl}/chat/completions`,{method:'POST',redirect:'error',signal:combined,
       headers:{authorization:`Bearer ${apiKey}`,'content-type':'application/json',accept:'text/event-stream, application/json','cache-control':'no-store'},body:JSON.stringify(body)});
     let response=await send(),diagnostic;
     // Parameter compatibility retries precede any public text, reasoning or tool signal.
     for(let attempt=0;attempt<2&&[400,422].includes(response.status);attempt++){
-      diagnostic=await readAssistantProviderDiagnostic(response,apiKey);
+      diagnostic=await readAssistantProviderDiagnostic(response,apiKey,observeUsage);
+      if(usageObserved)break;
       const {param='',message=''}=diagnostic;
       if(body.max_tokens!==undefined&&(param==='max_tokens'||message.includes('max_completion_tokens'))){body.max_completion_tokens=body.max_tokens;delete body.max_tokens;}
       else if(body.stream&&(param==='stream'||message.includes('stream'))&&/unsupported|not support|not available/u.test(message))body.stream=false;
@@ -85,7 +90,7 @@ export async function officialAssistantChat(config,apiKey,request,signal,onText=
       response=await send();diagnostic=undefined;
     }
     diagnosticContext.status=response.status;diagnosticContext.upstreamRequestId=assistantProviderDiagnostic(null,response.headers,apiKey).requestId;
-    if(!response.ok)throw assistantProviderError(response.status,diagnostic??await readAssistantProviderDiagnostic(response,apiKey),diagnosticContext);
+    if(!response.ok)throw assistantProviderError(response.status,diagnostic??await readAssistantProviderDiagnostic(response,apiKey,observeUsage),diagnosticContext);
     if(!response.body)throw responseError('MODEL_RESPONSE_EMPTY','模型没有返回对话正文');
     diagnosticContext.phase=response.headers.get('content-type')?.includes('text/event-stream')?'provider_stream':'provider_response';
     if(configuration){
@@ -112,6 +117,7 @@ export async function officialAssistantChat(config,apiKey,request,signal,onText=
       if(data==='[DONE]'){ended=true;return;}
       let event;try{event=JSON.parse(data);}catch{throw responseError('MODEL_STREAM_JSON_INVALID','模型流式事件不是有效JSON');}
       if(!record(event))throw responseError('MODEL_STREAM_INVALID','模型流式事件结构无效');
+      if(event.usage!==undefined&&event.usage!==null)await observeUsage(event.usage,{created:event.created});
       if(event.error)throw assistantProviderError(response.status,assistantProviderDiagnostic(event,response.headers,apiKey),{...diagnosticContext,phase:'provider_stream'});
       if(!Array.isArray(event.choices))throw responseError('MODEL_STREAM_INVALID','模型流式事件缺少候选');
       if(event.choices.length===0)return;
@@ -174,6 +180,7 @@ export async function officialAssistantChat(config,apiKey,request,signal,onText=
       const raw=Buffer.concat(parts).toString('utf8');
       if(raw.includes(apiKey))throw responseError('MODEL_RESPONSE_SENSITIVE','模型响应包含不应公开的服务信息');
       let parsed;try{parsed=JSON.parse(raw);}catch{throw responseError('MODEL_RESPONSE_JSON_INVALID','模型没有返回有效对话JSON');}
+      if(parsed?.usage!==undefined&&parsed.usage!==null)await observeUsage(parsed.usage,{created:parsed.created});
       const result=normalize(parsed,request.tools),message=result.choices[0].message;
       if(message.reasoning_content)await onReasoning(message.reasoning_content);
       if(message.content)await onText(message.content);

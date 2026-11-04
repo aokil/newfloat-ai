@@ -9,7 +9,7 @@ import { cozeModelFailureCode, cozeProjectModelCompletion, cozeProjectModelMetad
 import type { CozeModelExecutionContext, CozeModelMetadata, CozeSearchResult, CozeTestResult, CozeExtractionResult } from './coze-llm.server';
 import {cozeProjectAssistantCompletion} from './coze-assistant.server';
 import {cozeProjectMediaOperation} from './coze-media.server';
-import type {CozeAssistantEmit,CozeAssistantConfigure} from '../../question-bank/server/src/coze-assistant-transport.js';
+import type {CozeAssistantEmit,CozeAssistantConfigure,CozeAssistantUsage} from '../../question-bank/server/src/coze-assistant-transport.js';
 
 type ModelConfiguration = { modelId: string; timeoutMs: number; maxOutputTokens: number };
 type CallContext = CozeModelExecutionContext & { requestId: string; image?: AiImagePayload };
@@ -20,7 +20,7 @@ export type NativeModelBridge = {
   search(model: unknown, question: unknown, context: unknown): Promise<CozeSearchResult>;
   extract(model: unknown, image: unknown, context: unknown): Promise<CozeExtractionResult>;
   assistant(model: unknown, request: unknown, signal: AbortSignal, onText?: CozeAssistantEmit,
-    onReasoning?: CozeAssistantEmit, onConfiguration?: CozeAssistantConfigure): Promise<Record<string,unknown>>;
+    onReasoning?: CozeAssistantEmit, onConfiguration?: CozeAssistantConfigure, onUsage?: CozeAssistantUsage): Promise<Record<string,unknown>>;
   media(operation: unknown, input: unknown, signal: AbortSignal): Promise<Record<string,unknown>>;
 };
 
@@ -124,12 +124,12 @@ export function nativeModelBridge(): NativeModelBridge {
       catch (error: unknown) { throw await nativePublicFailure(error); }
     },
     async assistant(model: unknown, request: unknown, signal: AbortSignal, onText: CozeAssistantEmit=async()=>{},
-      onReasoning: CozeAssistantEmit=async()=>{},onConfiguration: CozeAssistantConfigure=async()=>{}) {
+      onReasoning: CozeAssistantEmit=async()=>{},onConfiguration: CozeAssistantConfigure=async()=>{},onUsage: CozeAssistantUsage=async()=>{}) {
       try {
         if(!record(model)||model.execution!=='coze'||typeof model.provider!=='string'||typeof model.modelId!=='string')
           throw new ApiError(422,'COZE_ASSISTANT_CONFIGURATION_INVALID','Coze对话模型绑定格式无效');
         const result=await cozeProjectAssistantCompletion({execution:'coze',provider:model.provider,modelId:model.modelId},request,
-          {signal,onReasoning,onConfiguration});
+          {signal,onReasoning,onConfiguration,onUsage});
         if(signal.aborted)throw new ApiError(499,'ASSISTANT_REQUEST_CANCELLED','对话已取消，未返回工具决定');
         const choices=result.choices;
         if(Array.isArray(choices)&&record(choices[0])&&record(choices[0].message)&&typeof choices[0].message.content==='string'&&choices[0].message.content)

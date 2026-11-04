@@ -103,13 +103,14 @@ try {
     const result = await gateway(request('/v1/echo?url=https://example.invalid', { headers: {
       authorization: bearer, 'x-forwarded-for': '8.8.8.8', forwarded: 'for=8.8.8.8', 'x-real-ip': '8.8.8.8',
       'x-tiyu-client-ip': '8.8.8.8', 'x-tiyu-gateway-key': 'client-spoof', cookie: 'session=spoof',
-      'idempotency-key': 'synthetic-operation-id', 'x-float-points-precision': '2',
+      'idempotency-key': 'synthetic-operation-id', 'x-float-points-precision': '2', 'x-float-assistant-billing': 'token-v1',
     } }));
     const data = await result.json();
     assert.equal(data.headers.authorization, bearer);
     assert.equal(data.headers['x-tiyu-gateway-key'], key);
     assert.equal(data.headers['idempotency-key'], 'synthetic-operation-id');
     assert.equal(data.headers['x-float-points-precision'], '2');
+    assert.equal(data.headers['x-float-assistant-billing'], 'token-v1');
     for (const name of ['x-forwarded-for', 'forwarded', 'x-real-ip', 'x-tiyu-client-ip', 'cookie']) assert.equal(data.headers[name], undefined);
     assert.equal(result.headers.get('cache-control'), 'no-store');
     assert.equal(data.url, '/v1/echo?url=https://example.invalid');

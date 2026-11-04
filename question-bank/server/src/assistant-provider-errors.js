@@ -32,7 +32,7 @@ export function assistantProviderDiagnostic(value,headers,secret){
     requestId:headerId(headers,secret)||identifier(error.request_id,secret)||identifier(value?.request_id,secret)||identifier(embedded,secret)};
 }
 
-export async function readAssistantProviderDiagnostic(response,secret){
+export async function readAssistantProviderDiagnostic(response,secret,onUsage=async()=>{}){
   let payload;
   if(response.body){
     const reader=response.body.getReader(),parts=[];let size=0;
@@ -45,6 +45,7 @@ export async function readAssistantProviderDiagnostic(response,secret){
     }catch{/* The HTTP status/header ID remain useful if the error body cannot be read. */}
     finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
   }
+  if(payload?.usage!==undefined&&payload.usage!==null)await onUsage(payload.usage,{created:payload.created});
   return assistantProviderDiagnostic(payload,response.headers,secret);
 }
 

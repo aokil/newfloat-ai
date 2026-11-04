@@ -373,7 +373,7 @@ export function assistantResult(result,tools){
   if(typeof originalId!=='string'||!CALL_ID.test(originalId))call.id='assistant_call';
   return {id:typeof result.id==='string'&&/^[A-Za-z0-9_.:-]{1,200}$/u.test(result.id)?result.id:null,
     choices:[{index:0,finish_reason:'tool_calls',message:{...normalized.choices[0].message,content:null}}],
-    usage:{prompt_tokens:usage.prompt_tokens,completion_tokens:usage.completion_tokens,total_tokens:usage.total_tokens},testing:{adminOnly:true,pointsCharged:0}};
+    usage:{prompt_tokens:usage.prompt_tokens,completion_tokens:usage.completion_tokens,total_tokens:usage.total_tokens},billingRequired:true};
 }
 
 /** Normalize one native turn. Only actual provider reasoning_content is retained. */
@@ -401,7 +401,7 @@ export function assistantTurnResult(result,tools,{requireCallId=true,recoverInva
   }else if(choice.finish_reason!=='stop'||!content.trim())fail('MODEL_TURN_INCOMPLETE','模型没有返回完整正文或工具调用');
   return {choices:[{index:0,finish_reason:calls?'tool_calls':'stop',message:{role:'assistant',content:toolValidation?.ok===false&&message.content===null?null:content,
     ...(hasReasoning?{reasoning_content:message.reasoning_content}:{}),...(calls?{tool_calls:calls}:{})}}],
-    ...(toolValidation?{tool_validation:toolValidation}:{}),testing:{adminOnly:true,pointsCharged:0}};
+    ...(toolValidation?{tool_validation:toolValidation}:{}),billingRequired:true};
 }
 
 /** Legacy chat retains its optional phone handoff and call-id fallback. */

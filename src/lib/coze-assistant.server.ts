@@ -3,7 +3,7 @@ import {ApiError} from '../../question-bank/server/src/security.js';
 import {prepareCozeAssistant,COZE_ASSISTANT_PROTOCOL} from '../../question-bank/server/src/assistant-json-planner.js';
 import type {CozeAssistantBinding} from '../../question-bank/server/src/assistant-json-planner.js';
 import {cozeGatewayAssistant} from '../../question-bank/server/src/coze-assistant-transport.js';
-import type {CozeAssistantEmit,CozeAssistantConfigure} from '../../question-bank/server/src/coze-assistant-transport.js';
+import type {CozeAssistantEmit,CozeAssistantConfigure,CozeAssistantUsage} from '../../question-bank/server/src/coze-assistant-transport.js';
 import {cozeAssistantRuntime,readAuthenticatedAssistantBody,denyModelCompletion} from './coze-llm.server';
 
 const PROJECT_ID='7689833705046130729';
@@ -29,7 +29,7 @@ function safeFailure(error: unknown): {status: number; code: string; message: st
 /** All phone/file execution stays in App. This process returns one validated decision. */
 export async function cozeProjectAssistantCompletion(model: unknown, input: unknown, execution: {
   signal: AbortSignal; headers?: Headers | Record<string,string>;
-  onReasoning?: CozeAssistantEmit; onConfiguration?: CozeAssistantConfigure;
+  onReasoning?: CozeAssistantEmit; onConfiguration?: CozeAssistantConfigure; onUsage?: CozeAssistantUsage;
 }): Promise<Record<string,unknown>> {
   const config=binding(model),prepared=prepareCozeAssistant(config,input);
   const signal=AbortSignal.any([execution.signal,AbortSignal.timeout(prepared.request.timeoutSeconds*1000)]);
@@ -41,7 +41,7 @@ export async function cozeProjectAssistantCompletion(model: unknown, input: unkn
       throw new ApiError(422,'MODEL_IMAGE_UNSUPPORTED','当前Coze实际型号不支持本次图片或截图，未执行任务');
     const headers=runtime.config.getHeaders(HeaderUtils.extractForwardHeaders(execution.headers??new Headers()));
     const result=await cozeGatewayAssistant({baseUrl:runtime.config.modelBaseUrl,key:runtime.config.apiKey,headers},config,input,signal,
-      {onReasoning:execution.onReasoning,onConfiguration:execution.onConfiguration});
+      {onReasoning:execution.onReasoning,onConfiguration:execution.onConfiguration,onUsage:execution.onUsage});
     if(signal.aborted)throw new ApiError(499,'ASSISTANT_REQUEST_CANCELLED','对话已取消，未返回工具决定');
     return result;
   }finally{active--;}
@@ -77,7 +77,8 @@ export async function assistantCompletion(request: Request): Promise<Response> {
           try{
             await event(envelope);
             const result=await cozeProjectAssistantCompletion(model,input,{signal,headers:request.headers,
-              onReasoning:text=>event({reasoning_content:text}),onConfiguration:configuration=>event({configuration})});
+              onReasoning:text=>event({reasoning_content:text}),onConfiguration:configuration=>event({configuration}),
+              onUsage:(usage,metadata)=>event({usage,usage_metadata:metadata})});
             // Reasoning was already sent incrementally; do not duplicate a large field in the terminal frame.
             const choices=result.choices;
             if(Array.isArray(choices)&&record(choices[0])&&record(choices[0].message))delete choices[0].message.reasoning_content;

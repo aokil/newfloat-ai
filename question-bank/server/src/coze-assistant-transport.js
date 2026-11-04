@@ -55,7 +55,9 @@ function requireNormalFinish(finish,content,reasoning){
 }
 
 /** The same verified Coze gateway/identity as the SDK, isolated from search/test/extract. */
-export async function cozeGatewayAssistant(context,model,input,signal,{onReasoning=async()=>{},onConfiguration=async()=>{}}={}){
+export async function cozeGatewayAssistant(context,model,input,signal,{onReasoning=async()=>{},onConfiguration=async()=>{},onUsage=async()=>{}}={}){
+  let usageObserved=false;
+  const observeUsage=async(value,metadata)=>{usageObserved=true;await onUsage(value,metadata);};
   const prepared=prepareCozeAssistant(model,input),{request,body}=prepared;
   const url=new URL(context.baseUrl);
   if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash||typeof context.key!=='string'||context.key.length<8)
@@ -77,7 +79,8 @@ export async function cozeGatewayAssistant(context,model,input,signal,{onReasoni
     let response=await send(),rejection;
     // Only documented compatibility errors are retried, before delivering any model output.
     for(let attempt=0;attempt<2&&[400,422].includes(response.status);attempt++){
-      rejection=await readAssistantProviderDiagnostic(response,context.key);
+      rejection=await readAssistantProviderDiagnostic(response,context.key,observeUsage);
+      if(usageObserved)break;
       const {param='',message=''}=rejection;
       if(body.max_tokens!==undefined&&(param==='max_tokens'||message.includes('max_completion_tokens'))){body.max_completion_tokens=body.max_tokens;delete body.max_tokens;}
       else if(body.stream&&(param==='stream'||message.includes('stream'))&&/unsupported|not support|not available/u.test(message))body.stream=false;
@@ -85,7 +88,7 @@ export async function cozeGatewayAssistant(context,model,input,signal,{onReasoni
       check();response=await send();rejection=undefined;
     }
     diagnostic.status=response.status;
-    if(!response.ok)throw assistantProviderError(response.status,rejection??await readAssistantProviderDiagnostic(response,context.key),diagnostic);
+    if(!response.ok)throw assistantProviderError(response.status,rejection??await readAssistantProviderDiagnostic(response,context.key,observeUsage),diagnostic);
     if(!response.body)throw failure('MODEL_RESPONSE_EMPTY','Coze模型没有返回内容');
     const configuration={...prepared.configuration,request_state:'provider_http_accepted',parameters:Object.fromEntries(
       ['thinking','max_tokens','max_completion_tokens'].filter(key=>Object.hasOwn(body,key)).map(key=>[key,body[key]]))};
@@ -130,9 +133,9 @@ export async function cozeGatewayAssistant(context,model,input,signal,{onReasoni
       if(ended)throw failure('MODEL_STREAM_INCOMPLETE','Coze流结束后仍返回内容');
       let event;try{event=JSON.parse(data);}catch{throw failure('MODEL_STREAM_JSON_INVALID','Coze流式事件不是完整JSON');}
       if(!record(event))throw failure('MODEL_RESPONSE_INVALID','Coze流式事件结构无效');
+      if(event.usage!==undefined&&event.usage!==null){usage=event.usage;await observeUsage(event.usage,{created:event.created});}
       if(event.error)throw assistantProviderError(response.status,assistantProviderDiagnostic(event,response.headers,context.key),
         {...diagnostic,phase:'provider_stream'});
-      if(event.usage!==undefined&&event.usage!==null)usage=event.usage;
       if(!Array.isArray(event.choices)||event.choices.length>1)throw failure('MODEL_RESPONSE_INVALID','Coze返回了无效候选');
       if(!event.choices.length)return;
       const choice=event.choices[0];
@@ -154,6 +157,7 @@ export async function cozeGatewayAssistant(context,model,input,signal,{onReasoni
       buffer+=tail;
       let value;try{value=JSON.parse(buffer);}catch{throw failure('MODEL_RESPONSE_JSON_INVALID','Coze响应不是有效JSON');}
       if(!record(value))throw failure('MODEL_RESPONSE_INVALID','Coze响应结构无效');
+      if(value.usage!==undefined&&value.usage!==null)await observeUsage(value.usage,{created:value.created});
       if(value.error)throw assistantProviderError(response.status,assistantProviderDiagnostic(value,response.headers,context.key),diagnostic);
       if(!Array.isArray(value.choices)||value.choices.length!==1)throw failure('MODEL_RESPONSE_INVALID','Coze返回了无效候选');
       const choice=value.choices[0];if(!record(choice))throw failure('MODEL_RESPONSE_INVALID','Coze返回了无效候选');
@@ -176,7 +180,7 @@ export async function cozeGatewayAssistant(context,model,input,signal,{onReasoni
 
 /** HMAC bridge for an account server outside Coze. The native in-process path uses the same planner. */
 export function remoteCozeAssistant(bridge){
-  return async(model,input,signal,onText=async()=>{},onReasoning=async()=>{},onConfiguration=async()=>{})=>{
+  return async(model,input,signal,onText=async()=>{},onReasoning=async()=>{},onConfiguration=async()=>{},onUsage=async()=>{})=>{
     if(!bridge)throw failure('COZE_INTEGRATION_NOT_READY','Coze对话桥接尚未配置');
     const {request}=prepareCozeAssistant(model,input);
     const raw=JSON.stringify({model:{execution:'coze',provider:model.provider,modelId:model.modelId},request:input});
@@ -191,7 +195,7 @@ export function remoteCozeAssistant(bridge){
     catch{if(signal.aborted)throw cancelled();throw failure(combined.aborted?'MODEL_REQUEST_TIMEOUT':'COZE_ASSISTANT_UNAVAILABLE','Coze对话桥接连接失败或超时');}
     if(!response.body)throw failure('MODEL_RESPONSE_EMPTY','Coze对话桥接未返回内容');
     const reader=response.body.getReader(),decoder=new TextDecoder('utf-8',{fatal:true});
-    let bytes=0,buffer='',envelope,result,reasoning='',reasoningSeen=false,configurationSeen=false,ended=false,eof=false;
+    let bytes=0,buffer='',envelope,result,reasoning='',reasoningSeen=false,configurationSeen=false,usageSeen=false,ended=false,eof=false;
     const streaming=response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')===true;
     const diagnostic={provider:'coze',modelId:model.modelId,requestId:request.requestId,secret:bridge.key,
       status:response.status,phase:streaming?'bridge_stream':'bridge_response'};
@@ -209,6 +213,8 @@ export function remoteCozeAssistant(bridge){
           throw failure('COZE_ASSISTANT_IDENTITY_INVALID','Coze对话桥接项目、请求或协议不一致');
         envelope=true;
       }
+      if(value.usage!==undefined&&value.usage!==null){await onUsage(value.usage,record(value.usage_metadata)?value.usage_metadata:{});usageSeen=true;}
+      if(!usageSeen&&record(value.result)&&value.result.usage!==undefined)await onUsage(value.result.usage);
       if(value.configuration){configurationSeen=true;check();await onConfiguration(value.configuration);check();}
       if(value.reasoning_content!==undefined){
         if(typeof value.reasoning_content!=='string')throw failure('MODEL_REASONING_INVALID','桥接推理字段格式无效');
