@@ -45,7 +45,7 @@ export function prepareCozeAssistant(config,input){
 }
 
 /** Parse only a complete model turn. Generated IDs correlate actual App calls, not native provider calls. */
-export function cozeAssistantJsonResult(content,request,reasoning){
+export function cozeAssistantJsonResult(content,request,reasoning,usage){
   if(typeof content!=='string'||Buffer.byteLength(content,'utf8')>1536*1024)fail('Coze规划内容过大，未截断或执行');
   let value;try{value=JSON.parse(content);}catch{fail('Coze返回的操作指令不是完整JSON，未执行工具；可以重试或切换模型');}
   if(!record(value)||Object.keys(value).length!==2||!Object.hasOwn(value,'content')||!Object.hasOwn(value,'tool')||
@@ -58,7 +58,7 @@ export function cozeAssistantJsonResult(content,request,reasoning){
     if(args.length>ASSISTANT_SESSION_ARGUMENTS_LIMIT)fail('Coze工具参数超过处理范围，未截断或执行');
     call={id:'coze_json_'+request.requestId,type:'function',function:{name:value.tool.name,arguments:args}};
   }
-  const raw={choices:[{index:0,finish_reason:call?'tool_calls':'stop',message:{role:'assistant',content:value.content,
+  const raw={...(usage!==undefined?{usage}:{}),choices:[{index:0,finish_reason:call?'tool_calls':'stop',message:{role:'assistant',content:value.content,
     ...(call?{tool_calls:[call]}:{}),...(reasoning!==undefined?{reasoning_content:reasoning}:{})}}]};
   let result;
   try{result=request.mode==='chat'?assistantTurnResult(raw,request.tools,{recoverInvalidTools:false}):assistantResult(raw,request.tools);}

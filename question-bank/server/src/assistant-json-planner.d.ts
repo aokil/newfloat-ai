@@ -10,4 +10,4 @@ export type PreparedCozeAssistant = {
   configuration: Record<string, unknown>;
 };
 export function prepareCozeAssistant(config: CozeAssistantBinding, input: unknown): PreparedCozeAssistant;
-export function cozeAssistantJsonResult(content: string, request: ValidatedAssistantRequest, reasoning?: string): Record<string, unknown>;
+export function cozeAssistantJsonResult(content: string, request: ValidatedAssistantRequest, reasoning?: string, usage?: unknown): Record<string, unknown>;

@@ -4,7 +4,8 @@ import {randomUUID} from 'node:crypto';
 const record=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const names={deepseek:'DeepSeek',qwen:'Qwen',glm:'GLM',minimax:'MiniMax',doubao:'豆包',baichuan:'百川'};
 const diagnosticFields=new Set(['provider','model_id','request_id','backend_http_status','upstream_http_status','upstream_request_id',
-  'provider_error_code','provider_error_type','parameter','phase','transport_code','exception_type','retryable']);
+  'provider_error_code','provider_error_type','parameter','phase','transport_code','exception_type','retryable',
+  'upstream_finish_reason','stream_done_seen','stream_eof_seen','answer_received','reasoning_received']);
 
 // Error bodies can echo prompts or credentials. Only identifier-shaped metadata is public.
 function identifier(value,secret,maximum=128){
@@ -63,7 +64,7 @@ function diagnostic(context,extra={}){
 
 function publicMessage(reason,data){
   const facts=[];
-  if(data.upstream_http_status)facts.push(`${data.phase==='provider_stream'&&data.upstream_http_status===200?'流连接HTTP':'上游HTTP'} ${data.upstream_http_status}`);
+  if(data.upstream_http_status)facts.push(`${['provider_stream','bridge_stream'].includes(data.phase)&&data.upstream_http_status===200?'流连接HTTP':'上游HTTP'} ${data.upstream_http_status}`);
   if(data.provider_error_code)facts.push(`错误码 ${data.provider_error_code}`);
   const id=data.upstream_request_id||data.request_id;
   return reason+(facts.length?`（${facts.join('，')}）`:'')+
@@ -185,7 +186,14 @@ export function assistantBackendDiagnostic(error,{phase='backend_http',status,co
 
 export function reportAssistantFailure(error,context){
   if(!(error instanceof ApiError))return error;
-  const data=assistantErrorDiagnostic(error)||diagnostic(context,{retryable:error.statusCode===429||error.statusCode>=500});
+  const data=assistantErrorDiagnostic(error)||diagnostic(context,{retryable:typeof context.retryable==='boolean'?context.retryable:
+    error.statusCode===429||error.statusCode>=500});
+  const finish=identifier(context.upstreamFinishReason,context.secret,80);
+  if(finish)data.upstream_finish_reason=finish;
+  for(const [field,value] of Object.entries({stream_done_seen:context.streamDoneSeen,stream_eof_seen:context.streamEofSeen,
+    answer_received:context.answerReceived,reasoning_received:context.reasoningReceived})){
+    if(typeof value==='boolean')data[field]=value;
+  }
   const safeMessage=String(error.message).split(context.secret||'\u0000').join('[密钥已隐藏]')
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/giu,'Bearer [已隐藏]').replace(/\bsk-[A-Za-z0-9_-]+/gu,'[密钥已隐藏]');
   const result=new ApiError(error.statusCode,error.code,assistantErrorDiagnostic(error)?safeMessage:publicMessage(safeMessage,data),

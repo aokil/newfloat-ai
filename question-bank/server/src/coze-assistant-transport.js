@@ -1,6 +1,6 @@
 import {createHash,createHmac,randomBytes} from 'node:crypto';
 import {ApiError} from './security.js';
-import {assistantProviderError,assistantProviderDiagnostic,readAssistantProviderDiagnostic,assistantTransportError} from './assistant-provider-errors.js';
+import {assistantProviderError,assistantProviderDiagnostic,readAssistantProviderDiagnostic,assistantTransportError,reportAssistantFailure} from './assistant-provider-errors.js';
 import {prepareCozeAssistant,cozeAssistantJsonResult,COZE_ASSISTANT_PROTOCOL} from './assistant-json-planner.js';
 import {assistantTurnResult,assistantResult} from './assistant-protocol.js';
 
@@ -9,6 +9,50 @@ const PROJECT_ID='7689833705046130729',LIMIT=1536*1024;
 const record=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const failure=(code,message)=>new ApiError(502,code,message);
 const cancelled=()=>new ApiError(499,'ASSISTANT_REQUEST_CANCELLED','对话已取消，未继续执行工具');
+
+/** Incremental SSE framing: LF, CRLF (including split chunks), CR, comments and EOF tails. */
+function sseData(consume){
+  let buffer='',data=[];
+  const line=async value=>{
+    if(value===''){
+      if(data.length){const payload=data.join('\n');data=[];await consume(payload);}
+      return;
+    }
+    const colon=value.indexOf(':'),field=colon<0?value:value.slice(0,colon);
+    let content=colon<0?'':value.slice(colon+1);
+    if(content.startsWith(' '))content=content.slice(1);
+    if(field==='data')data.push(content);
+  };
+  return async(text,eof=false)=>{
+    buffer+=text;
+    let boundary;
+    while((boundary=/\r\n|\r|\n/u.exec(buffer))!==null){
+      // A trailing CR may be the first half of a CRLF in the next byte chunk.
+      if(!eof&&boundary[0]==='\r'&&boundary.index===buffer.length-1)break;
+      const value=buffer.slice(0,boundary.index);buffer=buffer.slice(boundary.index+boundary[0].length);
+      await line(value);
+    }
+    if(eof){if(buffer){const value=buffer;buffer='';await line(value);}await line('');}
+  };
+}
+
+function decodeResponse(decoder,value){
+  try{return value===undefined?decoder.decode():decoder.decode(value,{stream:true});}
+  catch{throw failure('MODEL_RESPONSE_ENCODING_INVALID','Coze响应包含无效或截断的UTF-8字符，未交付结果或执行工具');}
+}
+
+function requireNormalFinish(finish,content,reasoning){
+  if(finish==='length')throw failure('MODEL_OUTPUT_TRUNCATED','Coze回复因输出长度限制被截断，尚未形成完整结果；未执行工具');
+  if(finish==='content_filter')throw failure('MODEL_OUTPUT_BLOCKED','Coze模型服务因内容审核中止了回复，未返回完整结果或执行工具');
+  if(finish==='tool_calls'||finish==='function_call')throw failure('MODEL_JSON_PLAN_INVALID','Coze返回了原生工具结束状态，与当前JSON规划协议不一致；未执行工具');
+  if(finish&&finish!=='stop')throw failure('MODEL_STREAM_INCOMPLETE','Coze返回了当前接入尚未支持的结束状态，未确认完整结果或执行工具');
+  if(!finish)throw failure('MODEL_STREAM_INCOMPLETE',reasoning&&!content.trim()?
+    'Coze只返回了思考内容，未返回正式回复或操作指令及正常结束状态；未执行工具':
+    'Coze回复已停止传输，但未收到模型的正常结束状态；未将内容认作完整结果或执行工具');
+  if(!content.trim())throw failure('MODEL_RESPONSE_EMPTY',reasoning?
+    'Coze已报告结束，但只返回了思考内容，缺少正式回复或操作指令；未执行工具':
+    'Coze已报告结束，但没有返回正式回复或操作指令；未执行工具');
+}
 
 /** The same verified Coze gateway/identity as the SDK, isolated from search/test/extract. */
 export async function cozeGatewayAssistant(context,model,input,signal,{onReasoning=async()=>{},onConfiguration=async()=>{}}={}){
@@ -19,7 +63,7 @@ export async function cozeGatewayAssistant(context,model,input,signal,{onReasoni
   const deadline=AbortSignal.timeout(request.timeoutSeconds*1000),combined=AbortSignal.any([signal,deadline]);
   const diagnostic={provider:'coze',modelId:model.modelId,requestId:request.requestId,secret:context.key,timeoutSeconds:request.timeoutSeconds};
   const check=()=>{if(signal.aborted)throw cancelled();if(deadline.aborted)throw failure('MODEL_REQUEST_TIMEOUT','Coze模型响应超时');};
-  let reader;
+  let reader,streaming=false,eof=false,ended=false,finish='',content='',reasoning='';
   try{
     check();
     const headers=new Headers(context.headers);
@@ -48,7 +92,7 @@ export async function cozeGatewayAssistant(context,model,input,signal,{onReasoni
     check();await onConfiguration(configuration);
     reader=response.body.getReader();
     const decoder=new TextDecoder('utf-8',{fatal:true});
-    let bytes=0,buffer='',content='',reasoning='',heldReasoning='',reasoningSeen=false,finish='',ended=false;
+    let bytes=0,buffer='',heldReasoning='',reasoningSeen=false,usage;
     const emitReasoning=async text=>{
       if(typeof text!=='string')throw failure('MODEL_REASONING_INVALID','Coze推理字段格式无效');
       reasoningSeen=true;reasoning+=text;heldReasoning+=text;
@@ -63,54 +107,70 @@ export async function cozeGatewayAssistant(context,model,input,signal,{onReasoni
     const takeMessage=async message=>{
       if(!record(message))throw failure('MODEL_RESPONSE_INVALID','Coze消息结构无效');
       if(message.role!==undefined&&message.role!=='assistant')throw failure('MODEL_RESPONSE_INVALID','Coze响应角色无效');
+      if(message.content!==undefined&&message.content!==null&&typeof message.content!=='string')throw failure('MODEL_RESPONSE_INVALID','Coze规划正文格式无效');
+      if(message.reasoning_content!==undefined&&message.reasoning_content!==null&&typeof message.reasoning_content!=='string')throw failure('MODEL_REASONING_INVALID','Coze推理字段格式无效');
+      if(finish&&(message.content||message.reasoning_content||message.tool_calls?.length))
+        throw failure('MODEL_STREAM_INCOMPLETE','Coze在结束状态之后又返回了新的正文、思考或工具内容，未执行工具');
       if(message.content!==undefined&&message.content!==null){
-        if(typeof message.content!=='string')throw failure('MODEL_RESPONSE_INVALID','Coze规划正文格式无效');
         content+=message.content;
       }
       if(message.reasoning_content!==undefined&&message.reasoning_content!==null)await emitReasoning(message.reasoning_content);
       if(message.tool_calls!==undefined&&message.tool_calls!==null&&(!Array.isArray(message.tool_calls)||message.tool_calls.length))
         throw failure('MODEL_JSON_PLAN_INVALID','Coze没有遵循已选择的JSON规划协议，未执行工具');
     };
-    const frame=async raw=>{
-      const data=raw.split(/\r?\n/u).filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trimStart()).join('\n');
-      if(!data)return;
+    const setFinish=value=>{
+      if(value===undefined||value===null||value==='')return;
+      if(typeof value!=='string'||value.length>80)throw failure('MODEL_RESPONSE_INVALID','Coze返回的结束状态格式无效');
+      if(finish&&finish!==value)throw failure('MODEL_STREAM_INCOMPLETE','Coze返回了互相矛盾的结束状态，未执行工具');
+      finish=value;
+    };
+    const frame=async data=>{
+      if(!data.trim())return;
+      if(data.trim()==='[DONE]'){ended=true;return;}
       if(ended)throw failure('MODEL_STREAM_INCOMPLETE','Coze流结束后仍返回内容');
-      if(data==='[DONE]'){ended=true;return;}
       let event;try{event=JSON.parse(data);}catch{throw failure('MODEL_STREAM_JSON_INVALID','Coze流式事件不是完整JSON');}
       if(!record(event))throw failure('MODEL_RESPONSE_INVALID','Coze流式事件结构无效');
       if(event.error)throw assistantProviderError(response.status,assistantProviderDiagnostic(event,response.headers,context.key),
         {...diagnostic,phase:'provider_stream'});
+      if(event.usage!==undefined&&event.usage!==null)usage=event.usage;
       if(!Array.isArray(event.choices)||event.choices.length>1)throw failure('MODEL_RESPONSE_INVALID','Coze返回了无效候选');
       if(!event.choices.length)return;
-      if(finish)throw failure('MODEL_STREAM_INCOMPLETE','Coze在终态后继续输出');
-      const choice=event.choices[0];await takeMessage(choice.delta??{});
-      if(choice.finish_reason!==undefined&&choice.finish_reason!==null)finish=choice.finish_reason;
+      const choice=event.choices[0];
+      if(!record(choice)||choice.index!==undefined&&choice.index!==0)throw failure('MODEL_RESPONSE_INVALID','Coze返回了无效候选编号');
+      await takeMessage(choice.delta??{});setFinish(choice.finish_reason);
     };
-    const streaming=response.headers.get('content-type')?.includes('text/event-stream');
+    const frames=sseData(frame);
+    streaming=response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')===true;
+    diagnostic.phase=streaming?'provider_stream':'provider_response';
     while(!ended){
-      check();const {done,value}=await reader.read();if(done)break;
+      check();const {done,value}=await reader.read();if(done){eof=true;break;}
       bytes+=value.length;if(bytes>LIMIT)throw failure('MODEL_RESPONSE_TOO_LARGE','Coze响应超过处理范围，未截断或执行');
-      buffer+=decoder.decode(value,{stream:true});
-      if(streaming){let boundary;while(!ended&&(boundary=/\r?\n\r?\n/u.exec(buffer))!==null){const raw=buffer.slice(0,boundary.index);buffer=buffer.slice(boundary.index+boundary[0].length);await frame(raw);}}
+      const text=decodeResponse(decoder,value);
+      if(streaming)await frames(text);else buffer+=text;
     }
-    buffer+=decoder.decode();
-    if(streaming){if(!ended&&buffer.trim())await frame(buffer);if(!ended)throw failure('MODEL_STREAM_INCOMPLETE','Coze响应未完整结束，未执行工具');}
+    const tail=decodeResponse(decoder);
+    if(streaming){await frames(tail,true);if(!ended&&!eof)throw failure('MODEL_STREAM_INCOMPLETE','Coze流未确认正常关闭，未交付结果或执行工具');}
     else{
+      buffer+=tail;
       let value;try{value=JSON.parse(buffer);}catch{throw failure('MODEL_RESPONSE_JSON_INVALID','Coze响应不是有效JSON');}
       if(!record(value))throw failure('MODEL_RESPONSE_INVALID','Coze响应结构无效');
+      if(value.error)throw assistantProviderError(response.status,assistantProviderDiagnostic(value,response.headers,context.key),diagnostic);
       if(!Array.isArray(value.choices)||value.choices.length!==1)throw failure('MODEL_RESPONSE_INVALID','Coze返回了无效候选');
-      finish=value.choices[0].finish_reason;await takeMessage(value.choices[0].message);
+      const choice=value.choices[0];if(!record(choice))throw failure('MODEL_RESPONSE_INVALID','Coze返回了无效候选');
+      await takeMessage(choice.message);setFinish(choice.finish_reason);usage=value.usage;
     }
-    if(finish!=='stop')throw failure(finish==='length'?'MODEL_OUTPUT_TRUNCATED':'MODEL_STREAM_INCOMPLETE','Coze规划没有完整结束，未执行工具');
+    requireNormalFinish(finish,content,reasoning);
     if(content.includes(context.key))throw failure('MODEL_RESPONSE_SENSITIVE','模型响应包含不应公开的服务信息');
     check();
-    const result=cozeAssistantJsonResult(content,request,reasoningSeen?reasoning:undefined);
+    const result=cozeAssistantJsonResult(content,request,reasoningSeen?reasoning:undefined,usage);
     if(heldReasoning){check();await onReasoning(heldReasoning);}
     check();
     return {...result,configuration};
   }catch(error){
     if(signal.aborted)throw cancelled();
-    throw error instanceof ApiError?error:assistantTransportError(error,diagnostic,deadline.aborted);
+    const reported=error instanceof ApiError?error:assistantTransportError(error,diagnostic,deadline.aborted);
+    throw reportAssistantFailure(reported,{...diagnostic,retryable:false,upstreamFinishReason:finish,
+      ...(streaming?{streamDoneSeen:ended,streamEofSeen:eof}:{}),answerReceived:content.length>0,reasoningReceived:reasoning.length>0});
   }finally{if(reader){await reader.cancel().catch(()=>{});reader.releaseLock();}}
 }
 
@@ -131,7 +191,10 @@ export function remoteCozeAssistant(bridge){
     catch{if(signal.aborted)throw cancelled();throw failure(combined.aborted?'MODEL_REQUEST_TIMEOUT':'COZE_ASSISTANT_UNAVAILABLE','Coze对话桥接连接失败或超时');}
     if(!response.body)throw failure('MODEL_RESPONSE_EMPTY','Coze对话桥接未返回内容');
     const reader=response.body.getReader(),decoder=new TextDecoder('utf-8',{fatal:true});
-    let bytes=0,buffer='',envelope,result,reasoning='',reasoningSeen=false,configurationSeen=false,ended=false;
+    let bytes=0,buffer='',envelope,result,reasoning='',reasoningSeen=false,configurationSeen=false,ended=false,eof=false;
+    const streaming=response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')===true;
+    const diagnostic={provider:'coze',modelId:model.modelId,requestId:request.requestId,secret:bridge.key,
+      status:response.status,phase:streaming?'bridge_stream':'bridge_response'};
     const accept=async value=>{
       check();
       if(!record(value))throw failure('MODEL_RESPONSE_INVALID','Coze桥接事件结构无效');
@@ -140,53 +203,61 @@ export function remoteCozeAssistant(bridge){
         const message=typeof value.error.message==='string'&&value.error.message.length<=600&&!value.error.message.includes(bridge.key)?value.error.message:'Coze对话执行失败';
         throw new ApiError(response.ok?502:response.status,code,message);
       }
+      if(result!==undefined)throw failure('MODEL_STREAM_INCOMPLETE','Coze桥接在完整结果之后又返回内容，未交付重复或冲突的结果');
       if(!envelope){
         if(value.projectId!==PROJECT_ID||value.environment!==bridge.environment||value.requestId!==request.requestId||value.planningProtocol!==COZE_ASSISTANT_PROTOCOL)
           throw failure('COZE_ASSISTANT_IDENTITY_INVALID','Coze对话桥接项目、请求或协议不一致');
         envelope=true;
       }
-      if(value.configuration){configurationSeen=true;await onConfiguration(value.configuration);}
+      if(value.configuration){configurationSeen=true;check();await onConfiguration(value.configuration);check();}
       if(value.reasoning_content!==undefined){
         if(typeof value.reasoning_content!=='string')throw failure('MODEL_REASONING_INVALID','桥接推理字段格式无效');
         reasoningSeen=true;reasoning+=value.reasoning_content;if(reasoning.length>512*1024)throw failure('MODEL_RESPONSE_TOO_LARGE','桥接推理内容超出处理范围');
-        await onReasoning(value.reasoning_content);
+        check();await onReasoning(value.reasoning_content);check();
       }
-      if(value.result!==undefined){if(result)throw failure('MODEL_RESPONSE_INVALID','Coze返回重复结果');result=value.result;}
+      if(value.result!==undefined)result=value.result;
     };
+    const frames=sseData(async data=>{
+      if(!data.trim())return;
+      if(data.trim()==='[DONE]'){ended=true;return;}
+      if(ended)throw failure('MODEL_STREAM_INCOMPLETE','Coze桥接结束后仍返回内容');
+      let value;try{value=JSON.parse(data);}catch{throw failure('MODEL_STREAM_JSON_INVALID','Coze桥接流包含不完整的JSON事件，未执行工具');}
+      await accept(value);
+    });
     try{
-      const streaming=response.headers.get('content-type')?.includes('text/event-stream');
       while(!ended){
         check();
-        const {done,value}=await reader.read();if(done)break;bytes+=value.length;
+        const {done,value}=await reader.read();if(done){eof=true;break;}bytes+=value.length;
         if(bytes>LIMIT)throw failure('MODEL_RESPONSE_TOO_LARGE','Coze桥接响应过大，未截断');
-        buffer+=decoder.decode(value,{stream:true});
-        if(streaming){let boundary;while((boundary=/\r?\n\r?\n/u.exec(buffer))!==null){
-          const frame=buffer.slice(0,boundary.index);buffer=buffer.slice(boundary.index+boundary[0].length);
-          const data=frame.split(/\r?\n/u).filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trimStart()).join('\n');
-          if(data==='[DONE]'){ended=true;break;}if(data)await accept(JSON.parse(data));
-        }}
+        const text=decodeResponse(decoder,value);
+        if(streaming)await frames(text);else buffer+=text;
       }
-      buffer+=decoder.decode();
-      if(!streaming){await accept(JSON.parse(buffer));ended=true;}
+      const tail=decodeResponse(decoder);
+      if(streaming)await frames(tail,true);else{buffer+=tail;await accept(JSON.parse(buffer));}
       check();
-      if(!ended||!result||!envelope)throw failure('MODEL_STREAM_INCOMPLETE','Coze桥接未完整返回工具决定');
+      if((!ended&&!eof)||result===undefined||!envelope)throw failure('MODEL_STREAM_INCOMPLETE',reasoning?
+        'Coze桥接只返回了思考等增量内容，尚未收到完整正式回复或工具决定；未执行工具':
+        'Coze桥接未完整返回正式回复或工具决定，未执行工具');
       if(!record(result)||!Array.isArray(result.choices)||result.choices.length!==1||!record(result.choices[0].message))throw failure('MODEL_RESPONSE_INVALID','Coze桥接结果结构无效');
       if(reasoningSeen)result.choices[0].message.reasoning_content=reasoning;
       const normalized=request.mode==='chat'?assistantTurnResult(result,request.tools,{recoverInvalidTools:false}):assistantResult(result,request.tools);
       if(!record(result.configuration)||result.configuration.planning_protocol!==COZE_ASSISTANT_PROTOCOL)
         throw failure('MODEL_CONFIGURATION_UNCONFIRMED','Coze桥接未确认本轮JSON规划协议');
-      if(!configurationSeen)await onConfiguration(result.configuration);
+      if(!configurationSeen){check();await onConfiguration(result.configuration);check();}
       const message=normalized.choices[0].message;
-      if(!reasoningSeen&&message.reasoning_content)await onReasoning(message.reasoning_content);
-      if(message.content)await onText(message.content);
+      if(!reasoningSeen&&message.reasoning_content){check();await onReasoning(message.reasoning_content);check();}
+      if(message.content){check();await onText(message.content);check();}
       check();
       return {...normalized,configuration:result.configuration,planningProtocol:COZE_ASSISTANT_PROTOCOL,toolCallIdSource:'adapter'};
     }catch(error){
       if(signal.aborted)throw cancelled();
-      if(combined.aborted)throw failure('MODEL_REQUEST_TIMEOUT','Coze对话桥接响应超时，未继续执行工具');
-      if(error instanceof ApiError)throw error;
-      if(error instanceof SyntaxError)throw failure('MODEL_STREAM_JSON_INVALID','Coze桥接响应不是有效JSON，未执行工具');
-      throw failure('MODEL_NETWORK_ERROR','读取Coze对话桥接响应失败，请重试');
+      const reported=combined.aborted?failure('MODEL_REQUEST_TIMEOUT','Coze对话桥接响应超时，未继续执行工具'):
+        error instanceof ApiError?error:error instanceof SyntaxError?failure('MODEL_STREAM_JSON_INVALID','Coze桥接响应不是有效JSON，未执行工具'):
+        failure('MODEL_NETWORK_ERROR','读取Coze对话桥接响应失败，未交付结果或执行工具');
+      throw reportAssistantFailure(reported,{...diagnostic,retryable:false,upstreamFinishReason:result?.choices?.[0]?.finish_reason,
+        ...(streaming?{streamDoneSeen:ended,streamEofSeen:eof}:{}),
+        answerReceived:typeof result?.choices?.[0]?.message?.content==='string'&&result.choices[0].message.content.length>0,
+        reasoningReceived:reasoning.length>0});
     }finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
   };
 }
