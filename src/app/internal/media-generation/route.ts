@@ -1,0 +1,11 @@
+import {mediaGeneration} from '@/lib/coze-media.server';
+import {denyModelCompletion} from '@/lib/coze-llm.server';
+export const runtime='nodejs';
+export const dynamic='force-dynamic';
+export const POST=mediaGeneration;
+export const GET=denyModelCompletion;
+export const PUT=denyModelCompletion;
+export const PATCH=denyModelCompletion;
+export const DELETE=denyModelCompletion;
+export const HEAD=denyModelCompletion;
+export const OPTIONS=denyModelCompletion;

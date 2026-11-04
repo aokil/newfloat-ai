@@ -1,10 +1,14 @@
 import { BRIDGE_ERRORS } from '../../question-bank/server/src/coze-model-transport.js';
+import { ApiError } from '../../question-bank/server/src/security.js';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { validateAiImage } from '../../question-bank/server/src/ai-image.js';
 import type { AiImagePayload } from '../../question-bank/server/src/ai-image.js';
 import { cozeModelFailureCode, cozeProjectModelCompletion, cozeProjectModelMetadata,
-  cozeProjectModelsReady } from './coze-llm.server';
+  cozeProjectModelsReady, BridgeError } from './coze-llm.server';
 import type { CozeModelExecutionContext, CozeModelMetadata, CozeSearchResult, CozeTestResult, CozeExtractionResult } from './coze-llm.server';
 import {cozeProjectAssistantCompletion} from './coze-assistant.server';
+import {cozeProjectMediaOperation} from './coze-media.server';
 import type {CozeAssistantEmit,CozeAssistantConfigure} from '../../question-bank/server/src/coze-assistant-transport.js';
 
 type ModelConfiguration = { modelId: string; timeoutMs: number; maxOutputTokens: number };
@@ -17,6 +21,7 @@ export type NativeModelBridge = {
   extract(model: unknown, image: unknown, context: unknown): Promise<CozeExtractionResult>;
   assistant(model: unknown, request: unknown, signal: AbortSignal, onText?: CozeAssistantEmit,
     onReasoning?: CozeAssistantEmit, onConfiguration?: CozeAssistantConfigure): Promise<Record<string,unknown>>;
+  media(operation: unknown, input: unknown, signal: AbortSignal): Promise<Record<string,unknown>>;
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -62,6 +67,39 @@ function safeFailure(error: unknown): Error {
     code === 'PROVIDER_RESPONSE_TOO_LARGE' ? 'PROVIDER_RESPONSE_TOO_LARGE' : 'PROVIDER_FAILED');
 }
 
+type RuntimeApiErrorConstructor = new (status: number, code: string, message: string, details?: unknown) => Error;
+let runtimeApiErrorClass: Promise<RuntimeApiErrorConstructor> | undefined;
+
+/** The Fastify backend is unbundled, so its ApiError class differs from the bundled copy.
+ * Rehydrate only errors already classified as public by this bridge; raw SDK errors stay private. */
+async function nativePublicFailure(error: unknown): Promise<unknown> {
+  const failure = error instanceof ApiError && record(error) && typeof error.statusCode === 'number' && typeof error.code === 'string'
+    ? {status: error.statusCode, code: error.code, message: error.message, details: error.details}
+    : error instanceof BridgeError
+      ? {status: error.status, code: error.code, message: error.publicMessage, details: undefined}
+      : null;
+  if (!failure || !Number.isInteger(failure.status) || failure.status < 400 || failure.status > 599 ||
+      !/^[A-Z0-9_]{1,80}$/.test(failure.code) || typeof failure.message !== 'string') return error;
+  try {
+    runtimeApiErrorClass ??= (async () => {
+      // Exactly the same fixed source path imported by createCozeApp, never a request-provided path.
+      const loaded: unknown = await import(/* webpackIgnore: true */ pathToFileURL(path.resolve(process.cwd(), 'question-bank/server/src/security.js')).href);
+      if (!record(loaded) || typeof loaded.ApiError !== 'function') throw new Error('NATIVE_ERROR_CLASS_UNAVAILABLE');
+      return loaded.ApiError as RuntimeApiErrorConstructor;
+    })();
+    const RuntimeApiError = await runtimeApiErrorClass;
+    const converted = new RuntimeApiError(failure.status, failure.code, failure.message, failure.details);
+    if (error instanceof Error && typeof error.stack === 'string') {
+      const prefix = error.message ? `${error.name}: ${error.message}` : error.name;
+      if (error.stack.startsWith(prefix)) converted.stack = `${converted.name}: ${converted.message}${error.stack.slice(prefix.length)}`;
+    }
+    return converted;
+  } catch {
+    runtimeApiErrorClass = undefined;
+    return error;
+  }
+}
+
 /** Direct SDK adapter for Fastify in this Coze process; no localhost server, HMAC or extra billing. */
 export function nativeModelBridge(): NativeModelBridge {
   async function execute(mode: 'search' | 'test' | 'extract', model: unknown, question: unknown, context: unknown) {
@@ -81,17 +119,23 @@ export function nativeModelBridge(): NativeModelBridge {
   }
   return Object.freeze({
     get ready() { return cozeProjectModelsReady(); },
+    async media(operation: unknown, input: unknown, signal: AbortSignal) {
+      try { return await cozeProjectMediaOperation(operation, input, signal); }
+      catch (error: unknown) { throw await nativePublicFailure(error); }
+    },
     async assistant(model: unknown, request: unknown, signal: AbortSignal, onText: CozeAssistantEmit=async()=>{},
       onReasoning: CozeAssistantEmit=async()=>{},onConfiguration: CozeAssistantConfigure=async()=>{}) {
-      if(!record(model)||model.execution!=='coze'||typeof model.provider!=='string'||typeof model.modelId!=='string')
-        throw new Error('COZE_ASSISTANT_CONFIGURATION_INVALID');
-      const result=await cozeProjectAssistantCompletion({execution:'coze',provider:model.provider,modelId:model.modelId},request,
-        {signal,onReasoning,onConfiguration});
-      if(signal.aborted)throw new Error('ASSISTANT_REQUEST_CANCELLED');
-      const choices=result.choices;
-      if(Array.isArray(choices)&&record(choices[0])&&record(choices[0].message)&&typeof choices[0].message.content==='string'&&choices[0].message.content)
-        await onText(choices[0].message.content);
-      return result;
+      try {
+        if(!record(model)||model.execution!=='coze'||typeof model.provider!=='string'||typeof model.modelId!=='string')
+          throw new ApiError(422,'COZE_ASSISTANT_CONFIGURATION_INVALID','Coze对话模型绑定格式无效');
+        const result=await cozeProjectAssistantCompletion({execution:'coze',provider:model.provider,modelId:model.modelId},request,
+          {signal,onReasoning,onConfiguration});
+        if(signal.aborted)throw new ApiError(499,'ASSISTANT_REQUEST_CANCELLED','对话已取消，未返回工具决定');
+        const choices=result.choices;
+        if(Array.isArray(choices)&&record(choices[0])&&record(choices[0].message)&&typeof choices[0].message.content==='string'&&choices[0].message.content)
+          await onText(choices[0].message.content);
+        return result;
+      } catch (error: unknown) { throw await nativePublicFailure(error); }
     },
     async metadata() {
       try {

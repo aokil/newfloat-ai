@@ -1,0 +1,10 @@
+export const MEDIA_BODY_LIMIT: number;
+export const MEDIA_REFERENCE_BYTES: number;
+export type MediaReference={file_id:string;mimeType:'image/jpeg'|'image/png'|'image/webp';data:string;sha256:string};
+export type MediaParameters={prompt:string;size?:string;count?:number;resolution?:string;ratio?:string;duration?:number;generate_audio?:boolean;
+  watermark?:boolean;reference_mode?:'first_frame'|'first_last_frame'|'reference_images'};
+export type MediaCreateRequest={jobId:string;conversationId:string;taskId:string;kind:'image'|'video';modelId:string;
+  parameters:MediaParameters;references:MediaReference[];timeoutSeconds:number;digest:string};
+export function mediaCreateRequest(input:unknown):MediaCreateRequest;
+export function mediaJobId(value:unknown):string;
+export function mediaPublicJob(job:Record<string,unknown>):Record<string,unknown>;

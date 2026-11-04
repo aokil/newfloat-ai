@@ -78,7 +78,7 @@ export type CozeRuntimeIdentityDiagnostics = {
   workloadEnvironment: Record<(typeof WORKLOAD_IDENTITY_ENV)[number], boolean>;
 };
 
-class BridgeError extends Error {
+export class BridgeError extends Error {
   constructor(readonly status: number, readonly code: string, readonly publicMessage: string) {
     super(code);
   }
@@ -221,7 +221,7 @@ async function deadline<T>(operation: Promise<T>, expiresAt: number, error: Brid
   }
 }
 
-async function readRawBody(request: Request, limit = BODY_LIMIT): Promise<Uint8Array> {
+async function readRawBody(request: Request, limit = BODY_LIMIT, timeoutMs = 10_000): Promise<Uint8Array> {
   const length = request.headers.get('content-length');
   if (length !== null && (!/^\d+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) > limit)) {
     throw new BridgeError(413, 'REQUEST_TOO_LARGE', '请求内容过大');
@@ -229,7 +229,7 @@ async function readRawBody(request: Request, limit = BODY_LIMIT): Promise<Uint8A
   if (!request.body) return new Uint8Array();
   const reader = request.body.getReader();
   const parts: Uint8Array[] = [];
-  const expiresAt = Date.now() + 10_000;
+  const expiresAt = Date.now() + timeoutMs;
   let total = 0;
   try {
     while (true) {
@@ -599,6 +599,24 @@ export async function readAuthenticatedAssistantBody(request: Request): Promise<
   if (!authenticate(request, credentials, raw, path)) return null;
   if ((request.headers.get('content-encoding') && request.headers.get('content-encoding') !== 'identity') ||
     !/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') ?? '')) throw invalidRequest();
+  return raw;
+}
+
+/** Generative models have their own SDK catalogue, not the LLM-only listModels allowlist. */
+export async function cozeGenerationRuntime(): Promise<{config: Config; environment: ProjectEnvironment}> {
+  const context = await verifiedCozeProjectRuntimeContext();
+  return {config:context.config,environment:context.environment};
+}
+
+export async function readAuthenticatedMediaBody(request: Request): Promise<Uint8Array | null> {
+  const path='/internal/media-generation',url=new URL(request.url);
+  if(request.method!=='POST'||url.pathname!==path||url.search)return null;
+  const credentials=authenticationHeaders(request);if(!credentials)return null;
+  let raw: Uint8Array;
+  try{raw=await readRawBody(request,16*1024*1024,45_000);}catch{return null;}
+  if(!authenticate(request,credentials,raw,path))return null;
+  if((request.headers.get('content-encoding')&&request.headers.get('content-encoding')!=='identity')||
+    !/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type')??''))throw invalidRequest();
   return raw;
 }
 

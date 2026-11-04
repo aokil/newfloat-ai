@@ -1,6 +1,7 @@
 import {createHash,createHmac,randomBytes} from 'node:crypto';
 import {validateExtractedQuestion} from './ocr-extraction.js';
 import {remoteCozeAssistant} from './coze-assistant-transport.js';
+import {remoteCozeMedia} from './coze-media-transport.js';
 
 const PROJECT_ID='7689833705046130729';
 const BRIDGE_PATH='/internal/model-completion';
@@ -115,7 +116,7 @@ export function configuredCozeBridge(env=process.env){
       timeoutMs:Math.min(model.timeoutMs-2000,25000),maxOutputTokens:model.maxOutputTokens},model.timeoutMs,requestId);
     return receipt(payload.result,mode);
   }
-  return Object.freeze({ready:!!config,assistant:remoteCozeAssistant(config),
+  return Object.freeze({ready:!!config,assistant:remoteCozeAssistant(config),media:remoteCozeMedia(config),
     async metadata(){
       if(!config)throw new Error('COZE_INTEGRATION_NOT_READY');
       try{const result=await invoke('GET',undefined,22000);return {projectId:PROJECT_ID,environment:config.environment,items:modelMetadata(result.items)};}

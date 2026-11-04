@@ -1,6 +1,7 @@
 import {ApiError,fields,text} from './security.js';
 import {aiImageUrl,validateAiImage} from './ai-image.js';
 import {assistantFileTools} from './assistant-file-tools.js';
+import {assistantMediaTools} from './assistant-media-tools.js';
 import {assistantThinkingRequest} from './assistant-thinking.js';
 
 const record=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
@@ -51,7 +52,7 @@ export function assistantTools(mode,visionEnabled=false){
       {summary:string(1200),evidence_text:string(420),evidence_package_name:string(240)},['summary']),
     tool('request_user','Pause for manual takeover or missing evidence. recovery_action is a suggestion; the client verifies actual device state before offering a recovery button.',
       {reason:string(1200),recovery_action:string(32,RECOVERY_ACTIONS)},['reason']),
-    ...(mode==='session'?[...assistantTools('chat'),...assistantFileTools()]:[])
+    ...(mode==='session'?[...assistantTools('chat'),...assistantFileTools(),...assistantMediaTools()]:[])
   ];
 }
 
