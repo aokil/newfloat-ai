@@ -41,7 +41,7 @@ function bridge(image){
 }
 
 test('durable idempotency dispatches one creation and never publishes provider URLs to the model',async t=>{
-  const store=receipts(),provider=bridge(),jobs=assistantMediaJobs(store,provider);t.after(()=>jobs.close());
+  const store=receipts(),provider=bridge(),jobs=assistantMediaJobs(store,provider,{billing:null});t.after(()=>jobs.close());
   await Promise.all([jobs.create('owner_a',wire()),jobs.create('owner_a',wire())]);
   await eventually(async()=>(await jobs.status('owner_a','fixture_media_1',new AbortController().signal)).status==='succeeded');
   const replay=await jobs.create('owner_a',wire());
@@ -51,7 +51,7 @@ test('durable idempotency dispatches one creation and never publishes provider U
 });
 
 test('stop-before-create tombstone prevents a late paid creation',async t=>{
-  const provider=bridge(),jobs=assistantMediaJobs(receipts(),provider);t.after(()=>jobs.close());
+  const provider=bridge(),jobs=assistantMediaJobs(receipts(),provider,{billing:null});t.after(()=>jobs.close());
   const stopped=await jobs.cancel('owner_a','fixture_late');assert.equal(stopped.cancelled,true);
   const late=await jobs.create('owner_a',wire('fixture_late'));
   assert.equal(late.status,'cancelled');assert.equal(provider.calls.filter(call=>call.operation.startsWith('generate_')).length,0);
@@ -62,7 +62,7 @@ test('submitted creation is retained after Stop; no destructive provider DELETE 
   const provider=bridge(signal=>new Promise((resolve,reject)=>{
     finish=resolve;signal.addEventListener('abort',()=>reject(new ApiError(499,'SYNTHETIC_ABORT','合成取消')),{once:true});
   }));
-  const jobs=assistantMediaJobs(receipts(),provider);t.after(()=>jobs.close());
+  const jobs=assistantMediaJobs(receipts(),provider,{billing:null});t.after(()=>jobs.close());
   await jobs.create('owner_a',wire('fixture_submitted'));
   await eventually(()=>typeof finish==='function');
   const stopped=await jobs.cancel('owner_a','fixture_submitted');assert.equal(stopped.cancelled,false);
@@ -74,7 +74,7 @@ test('submitted creation is retained after Stop; no destructive provider DELETE 
 
 test('unknown submission never automatically repeats creation and remains distinct from success',async t=>{
   const provider=bridge(async()=>{throw new ApiError(502,'MEDIA_SUBMISSION_UNKNOWN','合成网络响应丢失');});
-  const jobs=assistantMediaJobs(receipts(),provider);t.after(()=>jobs.close());
+  const jobs=assistantMediaJobs(receipts(),provider,{billing:null});t.after(()=>jobs.close());
   await jobs.create('owner_a',wire('fixture_uncertain'));
   await eventually(async()=>(await jobs.status('owner_a','fixture_uncertain',new AbortController().signal)).status==='unknown');
   const retry=await jobs.create('owner_a',wire('fixture_uncertain'));
@@ -83,11 +83,11 @@ test('unknown submission never automatically repeats creation and remains distin
 });
 
 test('owner isolation and restart recovery preserve video ids without recreating the task',async t=>{
-  const store=receipts(),provider=bridge(),first=assistantMediaJobs(store,provider);t.after(()=>first.close());
+  const store=receipts(),provider=bridge(),first=assistantMediaJobs(store,provider,{billing:null});t.after(()=>first.close());
   await first.create('owner_a',wire('fixture_video','video'));
   await eventually(()=>provider.calls.some(call=>call.operation==='generate_video'));
   await first.close();
-  const restored=assistantMediaJobs(store,provider);t.after(()=>restored.close());
+  const restored=assistantMediaJobs(store,provider,{billing:null});t.after(()=>restored.close());
   await assert.rejects(restored.status('owner_b','fixture_video',new AbortController().signal),error=>error.code==='MEDIA_JOB_NOT_FOUND');
   const found=await restored.status('owner_a','fixture_video',new AbortController().signal);
   assert.equal(found.status,'succeeded');assert.equal(provider.calls.filter(call=>call.operation==='generate_video').length,1);

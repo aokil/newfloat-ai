@@ -10,11 +10,13 @@ const keys=(value,allowed)=>{if(!record(value)||Object.keys(value).some(key=>!al
 const ordered=value=>Array.isArray(value)?value.map(ordered):record(value)?Object.fromEntries(Object.keys(value).sort().map(key=>[key,ordered(value[key])])):value;
 
 export function mediaCreateRequest(input){
-  keys(input,['jobId','conversationId','taskId','kind','modelId','parameters','references','timeoutSeconds']);
+  keys(input,['jobId','conversationId','taskId','kind','modelId','priceVersion','parameters','references','timeoutSeconds']);
   const jobId=token(input.jobId,'生成任务编号',80),conversationId=token(input.conversationId,'对话编号',100),taskId=token(input.taskId,'任务编号',100);
   if(!['image','video'].includes(input.kind))invalid('请选择图片或视频生成');
   const modelId=input.modelId??'';
   if(typeof modelId!=='string'||modelId.length>200||modelId&&!/^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/u.test(modelId))invalid('生成模型ID格式无效');
+  const priceVersion=input.priceVersion;
+  if(priceVersion!==undefined&&(typeof priceVersion!=='string'||!/^assistant-media-cny-\d{4}-\d{2}-\d{2}$/u.test(priceVersion)))invalid('媒体价目版本格式无效');
   const p=input.parameters;
   keys(p,input.kind==='image'?['prompt','size','count','watermark']:['prompt','reference_mode','resolution','ratio','duration','generate_audio','watermark']);
   if(typeof p.prompt!=='string'||!p.prompt.trim()||p.prompt.length>12000)invalid('请输入不超过12000字符的生成需求');
@@ -46,7 +48,7 @@ export function mediaCreateRequest(input){
   });
   const timeoutSeconds=input.timeoutSeconds??45;
   if(!Number.isSafeInteger(timeoutSeconds)||timeoutSeconds<5||timeoutSeconds>120)invalid('单次生成网络请求超时需为5–120秒');
-  const semantic={jobId,conversationId,taskId,kind:input.kind,modelId,parameters:p,
+  const semantic={jobId,conversationId,taskId,kind:input.kind,modelId,...(priceVersion===undefined?{}:{priceVersion}),parameters:p,
     references:normalized.map(({file_id,mimeType,sha256})=>({file_id,mimeType,sha256}))};
   return {...semantic,references:normalized,timeoutSeconds,
     digest:createHash('sha256').update(JSON.stringify(ordered(semantic))).digest('hex')};

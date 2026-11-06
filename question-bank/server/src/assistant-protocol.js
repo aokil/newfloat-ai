@@ -52,6 +52,9 @@ export function assistantTools(mode,visionEnabled=false){
       {summary:string(1200),evidence_text:string(420),evidence_package_name:string(240)},['summary']),
     tool('request_user','Pause for manual takeover or missing evidence. recovery_action is a suggestion; the client verifies actual device state before offering a recovery button.',
       {reason:string(1200),recovery_action:string(32,RECOVERY_ACTIONS)},['reason']),
+    tool('request_clarification',"Ask one focused question only when a task's missing goal, target or parameters require the user to decide. options are concise answer choices; an empty array allows free text. Clear tasks continue without per-action confirmation. Never use this to pretend a failed conversion or a permission step is complete.",
+      {question:{type:'string',minLength:1,maxLength:2000},options:{type:'array',minItems:0,maxItems:12,uniqueItems:true,
+        items:{type:'string',minLength:1,maxLength:300}}},['question','options']),
     ...(mode==='session'?[...assistantTools('chat'),...assistantFileTools(),...assistantMediaTools()]:[])
   ];
 }
@@ -82,6 +85,7 @@ search_apps支持空query枚举和offset/limit分页。根据返回的结构化�
 get_file_info可分页查找用户已选原件及实际产物；images_to_pdf使用原始上传顺序。只承诺实际工具支持的格式，缺少能力时明确说明，不能把不支持的文件转换转给control_phone或改扩展名假做。create_document的text必须是完整生成文本；超出预算直接说明，不静默截断。工具返回saved=false仅表示文件已生成且未记录另存；保存到用户位置由App真实写入完成后确认，不能声称已经保存。
 只用新鲜观察的节点ID和实时截图坐标，不猜测控件、页面、结果或应用安装状态。动作发出后重新观察核对，不重复执行核验不明的输入或提交。工具失败时根据具体错误和已发生动作恢复；可换查询、重观察或请求接管，不把所有失败说成模型不支持工具。
 遇到锁屏、登录、密码、验证码和系统授权时用request_user交用户处理，不能读取、猜测或代输密码和验证码。recovery_action仅是基于证据的建议，客户端会核对真实状态；不要为了显示按钮虚构障碍。用户说已完成手动步骤表示继续原任务，不能直接当作任务完成。
+任务目标、范围或关键参数有歧义且需要用户决定时，用request_clarification提出一个具体问题，给出简短options；需要用户自由输入则options为空数组。收到真实回答后继续原任务。明确的任务直接执行，不逐步要求确认，不把转换失败包装成“我已完成”。
 完成手机任务前使用finish并提供新鲜可见证据；无法核对时明确已完成和未完成部分并请求用户接管。只有实际tool结果能证明动作已执行。正常输出答案、简短活动说明或澄清问题，不编造思考字段或执行记录。`;
 
 function boundedString(value,label,max,empty=false){
@@ -254,7 +258,7 @@ function sessionHistory(messages,visionEnabled){
       if(!hasUser)invalid('原生会话必须从用户消息开始');
       if(message.content!==undefined&&message.content!==null&&typeof message.content!=='string')invalid('助手历史正文格式无效');
       clean={role:'assistant',content:message.content===undefined?null:message.content};
-      if(typeof clean.content==='string')boundedString(clean.content,'助手历史',24000,true);
+      if(typeof clean.content==='string')boundedString(clean.content,'助手历史',512*1024,true);
       if(message.reasoning_content!==undefined&&message.reasoning_content!==null)clean.reasoning_content=boundedString(message.reasoning_content,'模型思考历史',512*1024,true);
       if(message.tool_calls!==undefined&&message.tool_calls!==null&&!(Array.isArray(message.tool_calls)&&message.tool_calls.length===0)){
         if(!Array.isArray(message.tool_calls)||message.tool_calls.length!==1)invalid('每条助手历史最多一个完整工具调用');
@@ -386,7 +390,7 @@ export function assistantTurnResult(result,tools,{requireCallId=true,recoverInva
   if(choice.finish_reason==='content_filter')fail('MODEL_OUTPUT_BLOCKED','模型服务没有完成本轮输出');
   if(message.content!==undefined&&message.content!==null&&typeof message.content!=='string')fail('MODEL_RESPONSE_INVALID','模型正文格式无效');
   const content=typeof message.content==='string'?message.content:'';
-  if(content.length>24000)fail('MODEL_RESPONSE_TOO_LARGE','模型正文超出处理范围');
+  if(content.length>512*1024)fail('MODEL_RESPONSE_TOO_LARGE','模型正文超出处理范围，未截断');
   const hasReasoning=message.reasoning_content!==undefined&&message.reasoning_content!==null;
   if(hasReasoning&&(typeof message.reasoning_content!=='string'||message.reasoning_content.length>512*1024))
     fail('MODEL_REASONING_INVALID','模型reasoning_content格式或长度无效');

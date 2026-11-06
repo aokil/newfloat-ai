@@ -9,8 +9,8 @@ const responseError=(code,message)=>new ApiError(502,code,message);
 
 export function assistantProviderBody(config,request,stream){
   const body={model:config.modelId,messages:request.messages,
-    ...(request.tools.length?{tools:request.tools,parallel_tool_calls:false}:{}),
-    tool_choice:stream?'auto':'required',stream,max_tokens:stream?4096:1500};
+    ...(request.tools.length?{tools:request.tools,parallel_tool_calls:false,tool_choice:stream||config.provider==='deepseek'?'auto':'required'}:{}),
+    stream,max_tokens:stream?4096:1500};
   // Old clients keep their original request behaviour. New configuration is profile checked.
   if(request.thinking===undefined&&request.protocolVersion!==2){
     if(config.provider==='qwen')body.enable_thinking=false;
@@ -28,15 +28,24 @@ function assertProvider(config){
 }
 
 /** User-started legacy planning and probes; phone actions are never retried here. */
-export async function officialAssistantCompletion(config,apiKey,request,signal,onUsage=async()=>{}){
+export async function officialAssistantCompletion(config,apiKey,request,signal,onUsage=async()=>{},onRequest=async()=>{}){
   assertProvider(config);
   const diagnosticContext={provider:config.provider,modelId:config.modelId,requestId:request.requestId,timeoutSeconds:request.timeoutSeconds,secret:apiKey};
   const {body,configuration}=assistantProviderBody(config,request,false),deadline=AbortSignal.timeout(Math.min(request.timeoutSeconds*1000,120000));
   const combined=AbortSignal.any([signal,deadline]);
   const fail=error=>assistantTransportError(error,diagnosticContext,deadline.aborted);
+  let actualRequest;
   try{
-    const response=await fetch(`${config.baseUrl}/chat/completions`,{method:'POST',redirect:'error',signal:combined,
+    if(combined.aborted)throw fail();
+    const pending=fetch(`${config.baseUrl}/chat/completions`,{method:'POST',redirect:'error',signal:combined,
       headers:{authorization:`Bearer ${apiKey}`,'content-type':'application/json',accept:'application/json','cache-control':'no-store'},body:JSON.stringify(body)});
+    // This marker follows the actual transport invocation, never authentication or a price quote.
+    pending.catch(()=>{});
+    if(config.provider==='deepseek'){
+      actualRequest={request_id:request.requestId,model_source:'builtin',model:config.modelId,attempt:1};
+      await onRequest(actualRequest);
+    }
+    const response=await pending;
     diagnosticContext.status=response.status;diagnosticContext.upstreamRequestId=assistantProviderDiagnostic(null,response.headers,apiKey).requestId;
     if(!response.ok)throw assistantProviderError(response.status,await readAssistantProviderDiagnostic(response,apiKey,onUsage),diagnosticContext);
     if(!response.body)throw responseError('MODEL_RESPONSE_EMPTY','模型没有返回响应正文');
@@ -55,15 +64,17 @@ export async function officialAssistantCompletion(config,apiKey,request,signal,o
     if(raw.includes(apiKey))throw responseError('MODEL_RESPONSE_SENSITIVE','模型响应包含不应公开的服务信息');
     let result;try{result=JSON.parse(raw);}catch{throw responseError('MODEL_RESPONSE_JSON_INVALID','模型未返回有效的Chat Completions JSON');}
     if(result?.usage!==undefined&&result.usage!==null)await onUsage(result.usage,{created:result.created});
-    return {...assistantResult(result,request.tools),...(configuration?{configuration:{...configuration,request_state:'provider_http_accepted',profile_source:'trusted_binding'}}:{})};
+    return {...assistantResult(result,request.tools),...(actualRequest?{request:actualRequest}:{}),
+      ...(configuration?{configuration:{...configuration,request_state:'provider_http_accepted',profile_source:'trusted_binding'}}:{})};
   }catch(error){
+    if(error instanceof ApiError&&actualRequest)error.details={...(error.details??{}),request:actualRequest};
     if(signal.aborted)throw new ApiError(499,'ASSISTANT_REQUEST_CANCELLED','助手请求已取消');
     throw reportAssistantFailure(error instanceof ApiError?error:fail(error),diagnosticContext);
   }
 }
 
 /** Stream real content/reasoning_content independently; tools wait for a valid terminal turn. */
-export async function officialAssistantChat(config,apiKey,request,signal,onText=async()=>{},onReasoning=async()=>{},onConfiguration=async()=>{},onUsage=async()=>{}){
+export async function officialAssistantChat(config,apiKey,request,signal,onText=async()=>{},onReasoning=async()=>{},onConfiguration=async()=>{},onUsage=async()=>{},onRequest=async()=>{}){
   assertProvider(config);
   const diagnosticContext={provider:config.provider,modelId:config.modelId,requestId:request.requestId,timeoutSeconds:request.timeoutSeconds,secret:apiKey};
   const {body,configuration}=assistantProviderBody(config,request,true),deadline=AbortSignal.timeout(Math.min(request.timeoutSeconds*1000,120000));
@@ -74,10 +85,20 @@ export async function officialAssistantChat(config,apiKey,request,signal,onText=
   const responseBytesLimit=(request.protocolVersion===2?1536:512)*1024;
   const frameCharactersLimit=(request.protocolVersion===2?1024:256)*1024;
   let usageObserved=false;
+  let actualRequest,attempt=0;
   const observeUsage=async(value,metadata)=>{usageObserved=true;await onUsage(value,metadata);};
   try{
-    const send=()=>fetch(`${config.baseUrl}/chat/completions`,{method:'POST',redirect:'error',signal:combined,
-      headers:{authorization:`Bearer ${apiKey}`,'content-type':'application/json',accept:'text/event-stream, application/json','cache-control':'no-store'},body:JSON.stringify(body)});
+    const send=async()=>{
+      if(combined.aborted)throw fail();
+      const pending=fetch(`${config.baseUrl}/chat/completions`,{method:'POST',redirect:'error',signal:combined,
+        headers:{authorization:`Bearer ${apiKey}`,'content-type':'application/json',accept:'text/event-stream, application/json','cache-control':'no-store'},body:JSON.stringify(body)});
+      pending.catch(()=>{});
+      if(config.provider==='deepseek'){
+        actualRequest={request_id:request.requestId,model_source:'builtin',model:config.modelId,attempt:++attempt};
+        await onRequest(actualRequest);
+      }
+      return pending;
+    };
     let response=await send(),diagnostic;
     // Parameter compatibility retries precede any public text, reasoning or tool signal.
     for(let attempt=0;attempt<2&&[400,422].includes(response.status);attempt++){
@@ -85,7 +106,7 @@ export async function officialAssistantChat(config,apiKey,request,signal,onText=
       if(usageObserved)break;
       const {param='',message=''}=diagnostic;
       if(body.max_tokens!==undefined&&(param==='max_tokens'||message.includes('max_completion_tokens'))){body.max_completion_tokens=body.max_tokens;delete body.max_tokens;}
-      else if(body.stream&&(param==='stream'||message.includes('stream'))&&/unsupported|not support|not available/u.test(message))body.stream=false;
+      else if(body.stream&&(param==='stream'||message.includes('stream'))&&/unsupported|not support|not available/u.test(message)){body.stream=false;delete body.stream_options;}
       else break;
       response=await send();diagnostic=undefined;
     }
@@ -101,7 +122,7 @@ export async function officialAssistantChat(config,apiKey,request,signal,onText=
     const streaming=response.headers.get('content-type')?.includes('text/event-stream');
     const reader=response.body.getReader(),decoder=new TextDecoder(),parts=[];
     let received=0,buffer='',name='',args='',callId='',callType='',finish='',ended=false,hasTool=false;
-    const channels={content:{value:'',held:'',max:24000,seen:false,emit:onText},reasoning_content:{value:'',held:'',max:512*1024,seen:false,emit:onReasoning}};
+    const channels={content:{value:'',held:'',max:512*1024,seen:false,emit:onText},reasoning_content:{value:'',held:'',max:512*1024,seen:false,emit:onReasoning}};
     const emit=async (channel,text)=>{
       if(combined.aborted)throw fail();
       const state=channels[channel];state.seen=true;state.value+=text;state.held+=text;
@@ -184,7 +205,7 @@ export async function officialAssistantChat(config,apiKey,request,signal,onText=
       const result=normalize(parsed,request.tools),message=result.choices[0].message;
       if(message.reasoning_content)await onReasoning(message.reasoning_content);
       if(message.content)await onText(message.content);
-      return {...result,...(configuration?{configuration}:{})};
+      return {...result,...(actualRequest?{request:actualRequest}:{}),...(configuration?{configuration}:{})};
     }
     if(!ended||!finish)throw responseError('MODEL_STREAM_INCOMPLETE','模型流式响应未完整结束，请重试');
     if([callId,name,args].some(value=>value.includes(apiKey)))throw responseError('MODEL_RESPONSE_SENSITIVE','模型工具响应包含不应公开的服务信息');
@@ -192,8 +213,9 @@ export async function officialAssistantChat(config,apiKey,request,signal,onText=
       ...(channels.reasoning_content.seen?{reasoning_content:channels.reasoning_content.value}:{}),
       ...(hasTool?{tool_calls:[{id:callId,type:callType||'function',function:{name,arguments:args}}]}:{})}}]},request.tools);
     for(const channel of ['reasoning_content','content'])if(channels[channel].held)await channels[channel].emit(channels[channel].held);
-    return {...result,...(configuration?{configuration}:{})};
+    return {...result,...(actualRequest?{request:actualRequest}:{}),...(configuration?{configuration}:{})};
   }catch(error){
+    if(error instanceof ApiError&&actualRequest)error.details={...(error.details??{}),request:actualRequest};
     if(signal.aborted)throw new ApiError(499,'ASSISTANT_REQUEST_CANCELLED','对话已取消');
     throw reportAssistantFailure(error instanceof ApiError?error:fail(error),diagnosticContext);
   }

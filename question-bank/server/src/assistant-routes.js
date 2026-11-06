@@ -12,6 +12,22 @@ import {prepareCozeAssistant} from './assistant-json-planner.js';
 import {assistantTokenPricing,assistantTokenReservation} from './assistant-token-prices.js';
 import {assistantTokenBilling} from './assistant-token-billing.js';
 
+// Display only provider numeric counters; arbitrary fields in an upstream usage object stay private.
+const displayUsage=value=>{
+  if(value===null||typeof value!=='object'||Array.isArray(value))return null;
+  const output={};
+  const number=(source,target,key)=>{if(Number.isSafeInteger(source[key])&&source[key]>=0)target[key]=source[key];};
+  for(const key of ['prompt_tokens','completion_tokens','total_tokens','prompt_cache_hit_tokens','prompt_cache_miss_tokens','reasoning_tokens'])number(value,output,key);
+  for(const name of ['prompt_tokens_details','completion_tokens_details']){
+    const part=value[name];
+    if(part!==null&&typeof part==='object'&&!Array.isArray(part)){
+      const detail={};for(const key of ['cached_tokens','reasoning_tokens'])number(part,detail,key);
+      if(Object.keys(detail).length)output[name]=detail;
+    }
+  }
+  return Object.keys(output).length?output:null;
+};
+
 // Paid language-model requests only. Search, BYOK and media retain their separate rules.
 export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApiKey=null,deepseekApiKey=null,cozeBridge=null}){
   const cache=new Map(),pending=new Map(),controllers=new Set();let active=0;
@@ -71,6 +87,10 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
       return key;
     }catch{throw new ApiError(503,'MODEL_KEY_NOT_CONFIGURED','内置模型密钥尚未配置或不可用');}
   };
+  const requireDialogueDeepSeek=(item,binding)=>{
+    if(item.provider!=='deepseek'||binding&&(binding.config.provider!=='deepseek'||binding.config.execution==='coze'))
+      throw new ApiError(422,'ASSISTANT_DEEPSEEK_ONLY','对话目前仅支持DeepSeek，请重新选择');
+  };
   app.addHook('onClose',async()=>{for(const controller of controllers)controller.abort();cache.clear();});
   const cozeModels=async()=>{
     try{const metadata=await cozeBridge.metadata();if(!Array.isArray(metadata.items))throw new Error('metadata');return metadata.items;}
@@ -85,21 +105,17 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
   app.get('/v1/assistant/models',{preHandler:auth},async req=>{
     await billing.recover(req.auth.user_id);
     const bindings=await configuredCatalog(store);
-    let metadata=null;
-    if(cozeBridge?.ready&&[...bindings.values()].some(binding=>binding?.config.execution==='coze'))try{metadata=await cozeModels();}catch{}
-    return {items:MODEL_CATALOG.filter(item=>item.provider!=='baichuan'&&knownPrice(bindings.get(item.key)?.config))
-      .sort((left,right)=>(left.provider==='deepseek'?0:1)-(right.provider==='deepseek'?0:1)).map(item=>{
+    // Dialogue's built-in language selection is independent of search and media's Coze catalogue.
+    return {items:MODEL_CATALOG.filter(item=>item.provider==='deepseek'&&bindings.get(item.key)?.config.provider==='deepseek'&&bindings.get(item.key)?.config.execution!=='coze'&&knownPrice(bindings.get(item.key)?.config)).map(item=>{
       const binding=bindings.get(item.key);let reason=unavailable(item,binding);
-      if(!reason&&binding.config.execution!=='coze')try{secretFor(binding);}catch{reason='MODEL_KEY_NOT_CONFIGURED';}
-      const coze=binding?.config.execution==='coze',selected=metadata?.find(model=>model.model_id===binding?.config.modelId);
-      if(!reason&&coze)reason=metadata===null?'COZE_MODEL_LIST_UNAVAILABLE':!selected?'COZE_MODEL_UNAVAILABLE':null;
-      const supportsImages=!!binding&&(!coze||!!selected)&&modelSupportsImages(binding.config.modelId,selected?.input_types);
-      return {key:item.key,name:binding?.config.execution==='coze'?binding.config.displayName:item.name,provider:item.provider,
+      if(!reason)try{secretFor(binding);}catch{reason='MODEL_KEY_NOT_CONFIGURED';}
+      const supportsImages=!!binding&&modelSupportsImages(binding.config.modelId);
+      return {key:item.key,name:item.name,provider:item.provider,
         modelId:binding?.config.modelId??null,thinkingProfile:assistantThinkingProfile(binding?.config??{provider:item.provider}),
         available:!reason,unavailableReason:reason,supportsImages,capabilities:supportsImages?['text','image']:['text'],
-        planningProtocol:binding?.config.execution==='coze'?'coze_json_v1':'native_tools',
+        planningProtocol:'native_tools',
         toolsVerified:false,toolsStatus:'unverified',billing:knownPrice(binding.config)};
-    }),protocolVersion:2,sessionHistorySupported:true,thinkingConfigVersion:1,
+    }),protocolVersion:2,sessionHistorySupported:true,thinkingConfigVersion:1,clarificationToolsVersion:1,requestStatisticsVersion:1,
       billing:{version:1,mode:'token',pointsPerYuan:20,multiplier:'1.4',requiresClientHeader:'token-v1'}};
   });
   // A single task can legitimately make many sequential model decisions. Do not inherit
@@ -109,6 +125,7 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
     const request=assistantRequest(req.body),item=catalogEntry(request.modelKey),bindings=await configuredCatalog(store),binding=bindings.get(request.modelKey);
     if(request.mode==='chat')throw new ApiError(400,'ASSISTANT_REQUEST_INVALID','普通对话请使用对话生成接口');
     if(!item)throw new ApiError(400,'ASSISTANT_MODEL_INVALID','请选择内置目录中的模型');
+    requireDialogueDeepSeek(item,binding);
     const reason=unavailable(item,binding);
     if(reason)throw new ApiError(422,reason,availabilityMessage(reason));
     if((request.image||request.visionEnabled)&&!await supportsImagesFor(binding))throw new ApiError(422,'MODEL_IMAGE_UNSUPPORTED','当前内置型号不支持图片输入，请关闭视觉辅助或更换模型');
@@ -137,11 +154,12 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
     req.raw.once('aborted',disconnected);reply.raw.once('close',disconnected);
     if(req.raw.aborted||reply.raw.destroyed)controller.abort();
     const entry={digest,expires:now+ttl,pending:true,promise:null};
+    let actualRequest;
     const operation=(async()=>{
       try{
         if(controller.signal.aborted)throw new ApiError(499,'ASSISTANT_REQUEST_CANCELLED','助手请求已取消');
         const result=await (binding.config.execution==='coze'?cozeBridge.assistant(binding.config,req.body,controller.signal,undefined,undefined,undefined,meter.captureUsage):
-          officialAssistantCompletion(binding.config,key,request,controller.signal,meter.captureUsage));
+          officialAssistantCompletion(binding.config,key,request,controller.signal,meter.captureUsage,async value=>{actualRequest=value;}));
         const response=paidResult(result,await meter.finish());
         // A session revoked while the provider ran cannot deliver a new phone action.
         await paid(req);
@@ -149,7 +167,7 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
         return response;
       }catch(error){
         const bill=await meter.finish();
-        if(error instanceof ApiError)error.details={...(error.details??{}),billing:bill};
+        if(error instanceof ApiError)error.details={...(error.details??{}),billing:bill,...(actualRequest?{request:actualRequest}:{})};
         throw error;
       }finally{
         active--;const count=(pending.get(owner)||1)-1;
@@ -168,6 +186,7 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
     if(request.mode!=='chat')throw new ApiError(400,'ASSISTANT_REQUEST_INVALID','对话接口只接受chat请求');
     const item=catalogEntry(request.modelKey),bindings=await configuredCatalog(store),binding=bindings.get(request.modelKey);
     if(!item)throw new ApiError(400,'ASSISTANT_MODEL_INVALID','请选择内置目录中的模型');
+    requireDialogueDeepSeek(item,binding);
     const reason=unavailable(item,binding);
     if(reason)throw new ApiError(422,reason,availabilityMessage(reason));
     if((request.image||request.availableTools?.includes('take_screenshot'))&&!await supportsImagesFor(binding))
@@ -204,6 +223,15 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
       if(controller.signal.aborted||reply.raw.destroyed)throw new ApiError(499,'ASSISTANT_REQUEST_CANCELLED','对话已取消');
       if(!reply.raw.write(`data: ${JSON.stringify(value)}\n\n`))await once(reply.raw,'drain',{signal:controller.signal});
     };
+    let actualRequest;
+    const captureRequest=async value=>{actualRequest=value;await event({request:value});};
+    const captureUsage=async(value,metadata)=>{
+      await meter.captureUsage(value,metadata);
+      if(binding.config.provider==='deepseek'){
+        const counters=displayUsage(value);
+        if(counters)await event({usage:counters,...(actualRequest?{request:actualRequest}:{})});
+      }
+    };
     try{
       if(controller.signal.aborted)throw new ApiError(499,'ASSISTANT_REQUEST_CANCELLED','对话已取消');
       reply.hijack();
@@ -211,7 +239,7 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
       reply.raw.flushHeaders();
       const complete=binding.config.execution==='coze'?
         (onText,onReasoning,onConfiguration)=>cozeBridge.assistant(binding.config,req.body,controller.signal,onText,onReasoning,onConfiguration,meter.captureUsage):
-        (onText,onReasoning,onConfiguration)=>officialAssistantChat(binding.config,key,request,controller.signal,onText,onReasoning,onConfiguration,meter.captureUsage);
+        (onText,onReasoning,onConfiguration)=>officialAssistantChat(binding.config,key,request,controller.signal,onText,onReasoning,onConfiguration,captureUsage,captureRequest);
       const raw=await complete(async text=>{
         await event({choices:[{index:0,delta:{content:text},finish_reason:null}]});
       },async reasoning=>{
@@ -227,7 +255,7 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
       if(request.protocolVersion===2)result.protocolVersion=2;
       await event({choices:[{index:0,delta:{...(choice.message.tool_calls?{tool_calls:choice.message.tool_calls}:{})},finish_reason:choice.finish_reason}],
         ...(request.protocolVersion===2?{protocolVersion:2}:{}),...(result.tool_validation?{tool_validation:result.tool_validation}:{}),
-        ...(result.configuration?{configuration:result.configuration}:{}),billing:result.billing,usage:result.usage});
+        ...(result.configuration?{configuration:result.configuration}:{}),...(actualRequest?{request:actualRequest}:{}),billing:result.billing,usage:result.usage});
       entry.pending=false;resolvePending(result);
       reply.raw.end('data: [DONE]\n\n');
     }catch(error){
@@ -239,7 +267,8 @@ export async function assistantRoutes(app,{store,auth,modelMasterKey,baichuanApi
         const diagnostic=upstreamDiagnostic||assistantBackendDiagnostic(error,{phase:'backend_stream',code});
         const reason=error instanceof ApiError?error.message:`业务后台处理模型响应时发生异常（${diagnostic.exception_type}），尚未确定具体原因`;
         const message=upstreamDiagnostic?reason:`${reason}。后台追查编号：${diagnostic.request_id}`;
-        reply.raw.end(`data: ${JSON.stringify({error:{code,message,requestId:diagnostic.request_id,diagnostic,retryable:diagnostic.retryable},billing:bill})}\n\n`);
+        reply.raw.end(`data: ${JSON.stringify({error:{code,message,requestId:diagnostic.request_id,diagnostic,retryable:diagnostic.retryable},
+          ...(actualRequest?{request:actualRequest}:{}),billing:bill})}\n\n`);
       }
     }finally{
       active--;const count=(pending.get(owner)||1)-1;

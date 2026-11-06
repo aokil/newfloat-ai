@@ -5,7 +5,49 @@ import {cozeGenerationRuntime,readAuthenticatedMediaBody,denyModelCompletion} fr
 
 const record=(value:unknown):value is Record<string,unknown>=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const PROJECT_ID='7689833705046130729';
-function fail(status:number,code:string,message:string):never {throw new ApiError(status,code,message);}
+type MediaKind='image'|'video';
+type MediaEvidence={usage?:Record<string,number>;providerMetadata?:Record<string,string|number|boolean>};
+function fail(status:number,code:string,message:string,evidence?:MediaEvidence):never {
+  throw new ApiError(status,code,message,evidence&&Object.keys(evidence).length?{mediaEvidence:evidence}:undefined);
+}
+function mediaUsage(value:unknown,kind:MediaKind|undefined):Record<string,number>|undefined {
+  if(!record(value))return undefined;
+  const keys=kind==='image'?['generated_images','output_tokens','total_tokens']:kind==='video'?['completion_tokens','total_tokens']:
+    ['generated_images','output_tokens','completion_tokens','total_tokens'];
+  const usage:Record<string,number>={};
+  for(const key of keys){
+    const count=value[key];
+    if(count===undefined)continue;
+    // Never coerce numeric strings, invent missing counters or repair conflicting counters.
+    if(typeof count!=='number'||!Number.isSafeInteger(count)||count<0)return undefined;
+    usage[key]=count;
+  }
+  return Object.keys(usage).length?usage:undefined;
+}
+function providerMetadata(value:unknown):MediaEvidence['providerMetadata'] {
+  if(!record(value))return undefined;
+  const metadata:NonNullable<MediaEvidence['providerMetadata']>={};
+  if(typeof value.id==='string'&&/^[A-Za-z0-9_-]{1,200}$/u.test(value.id))metadata.id=value.id;
+  if(typeof value.status==='string'&&['queued','running','succeeded','failed','cancelled','expired'].includes(value.status))metadata.status=value.status;
+  if(typeof value.model==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/u.test(value.model))metadata.model=value.model;
+  if(typeof value.generate_audio==='boolean')metadata.generate_audio=value.generate_audio;
+  if(typeof value.resolution==='string'&&['480p','720p','1080p'].includes(value.resolution))metadata.resolution=value.resolution;
+  if(typeof value.ratio==='string'&&['16:9','9:16','1:1','4:3','3:4','21:9','adaptive'].includes(value.ratio))metadata.ratio=value.ratio;
+  if(typeof value.duration==='number'&&Number.isFinite(value.duration)&&value.duration>0)metadata.duration=value.duration;
+  return Object.keys(metadata).length?metadata:undefined;
+}
+function mediaEvidence(value:unknown,kind:MediaKind|undefined,fromProvider=false):MediaEvidence {
+  if(!record(value))return {};
+  const usage=mediaUsage(value.usage,kind),metadata=providerMetadata(fromProvider?value:value.providerMetadata);
+  return {...(usage?{usage}:{}),...(metadata?{providerMetadata:metadata}:{})};
+}
+function fileUrl(value:unknown):value is string {
+  if(typeof value!=='string'||value.length>8192||!value.startsWith('https://')||/[\u0000-\u0020\u007f]/u.test(value))return false;
+  try{const url=new URL(value);return url.protocol==='https:'&&!!url.hostname&&!url.username&&!url.password;}catch{return false;}
+}
+function failedFiles(code:string,message:string,evidence:MediaEvidence,errors:string[]=[]):Record<string,unknown> {
+  return {status:'failed',errorCode:code,message,files:[],errors,...evidence};
+}
 const modelName=(id:string,kind:string)=>id==='doubao-seedream-5-0-260128'?'Seedream 5.0 Lite':id==='doubao-seedance-2-0-260128'?'Seedance 2.0':`${kind==='image'?'图片':'视频'}生成 · ${id}`;
 const IMAGE_45='doubao-seedream-4-5-251128',VIDEO_15='doubao-seedance-1-5-pro-251215';
 
@@ -29,26 +71,29 @@ function catalogue(){
 
 function providerDetail(value:unknown):string {
   if(!record(value))return '';
-  const code=typeof value.code==='string'||typeof value.code==='number'?String(value.code).slice(0,100):'';
+  const code=(typeof value.code==='string'||typeof value.code==='number')&&/^[A-Za-z0-9_.-]{1,100}$/u.test(String(value.code))?String(value.code):'';
   const message=typeof value.message==='string'?value.message.replace(/[\r\n\t]/g,' ')
     .replace(/data:[^\s"'<>]+/gi,'[图片数据]').replace(/https?:\/\/[^\s"'<>]+/gi,'[文件地址]')
     .replace(/\bBearer\s+\S+/gi,'Bearer [隐藏]').replace(/(api[_-]?key|password|secret|token|验证码|密码)\s*[:=]\s*[^\s,;]+/gi,'$1=[隐藏]').slice(0,350):'';
   return [code,message].filter(Boolean).join(' · ');
 }
-function imageFiles(value:unknown):{files:Record<string,unknown>[];errors:string[]} {
-  if(!record(value)||!Array.isArray(value.data)||!value.data.length)fail(502,'MEDIA_GENERATION_FAILED','Coze未提供实际生成图片：'+(record(value)?providerDetail(value.error):''));
+function imageFiles(value:unknown):Record<string,unknown> {
+  // Billing evidence must survive missing/expired result URLs and partial delivery failures.
+  const evidence=mediaEvidence(value,'image',true);
+  if(!record(value)||!Array.isArray(value.data)||!value.data.length)return failedFiles('MEDIA_GENERATION_FAILED',
+    'Coze未提供实际生成图片：'+(record(value)?providerDetail(value.error):''),evidence);
   const files:Record<string,unknown>[]=[],errors:string[]=[];
   value.data.forEach((item:unknown,index:number)=>{
-    if(!record(item)||item.error||typeof item.url!=='string'||!item.url.startsWith('https://')||item.url.length>8192){
+    if(!record(item)||item.error||!fileUrl(item.url)){
       errors.push(`第${index+1}项：`+(record(item)&&item.error?providerDetail(item.error):'没有可取回的实际文件地址'));return;
     }
     files.push({url:item.url,kind:'image',mimeType:null,name:`生成图片${index+1}`});
   });
-  if(!files.length)fail(502,'MEDIA_GENERATION_FAILED',errors.join('；'));
-  return {files,errors};
+  if(!files.length)return failedFiles('MEDIA_GENERATION_FAILED',errors.join('；'),evidence,errors);
+  return {status:'succeeded',files,errors,...evidence};
 }
 
-async function upstream(config:Awaited<ReturnType<typeof cozeGenerationRuntime>>['config'],method:string,path:string,body:unknown,signal:AbortSignal):Promise<unknown>{
+async function upstream(config:Awaited<ReturnType<typeof cozeGenerationRuntime>>['config'],method:string,path:string,body:unknown,signal:AbortSignal,kind:MediaKind):Promise<unknown>{
   const base=new URL(config.baseUrl);
   if(base.protocol!=='https:'||base.username||base.password||base.search||base.hash)fail(503,'COZE_MEDIA_NOT_READY','Coze生成服务地址未通过项目身份检查');
   const headers=new Headers(config.getHeaders());headers.set('content-type','application/json');headers.set('accept','application/json');
@@ -64,8 +109,11 @@ async function upstream(config:Awaited<ReturnType<typeof cozeGenerationRuntime>>
   finally{await reader.cancel().catch(()=>undefined);reader.releaseLock();}
   const bytes=new Uint8Array(length);let offset=0;for(const part of parts){bytes.set(part,offset);offset+=part.length;}
   const raw=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
-  if(raw.includes(config.apiKey))fail(502,'MEDIA_RESULT_SENSITIVE','平台响应包含不应公开的身份数据，未写入生成记录');
   let value:unknown;try{value=JSON.parse(raw);}catch{fail(502,'MEDIA_RESULT_INVALID','Coze生成响应不是有效JSON');}
+  if(raw.includes(config.apiKey)){
+    const usage=mediaUsage(record(value)?value.usage:undefined,kind);
+    fail(502,'MEDIA_RESULT_SENSITIVE','平台响应包含不应公开的身份数据，未写入生成记录',usage?{usage}:undefined);
+  }
   if(!response.ok){
     const error=record(value)&&record(value.error)?value.error:null;
     const rawCode=error?.code;
@@ -74,7 +122,7 @@ async function upstream(config:Awaited<ReturnType<typeof cozeGenerationRuntime>>
     const message=response.status===401?'Coze生成服务鉴权失败':response.status===403?'Coze平台拒绝了本次生成访问或输入':
       response.status===404?'Coze生成接口或任务不存在':response.status===429?'Coze生成服务繁忙或限流':
       response.status<500?'Coze没有接受本次生成参数或内容':'Coze生成服务暂时不可用，提交结果可能未确认';
-    fail(response.status,'MEDIA_PROVIDER_REJECTED',`${message}（HTTP ${response.status}，${code}）`+(error?'：'+providerDetail(error):''));
+    fail(response.status,'MEDIA_PROVIDER_REJECTED',`${message}（HTTP ${response.status}，${code}）`+(error?'：'+providerDetail(error):''),mediaEvidence(value,kind,true));
   }
   return value;
 }
@@ -89,14 +137,16 @@ export async function cozeProjectMediaOperation(operation:unknown,input:unknown,
   const signal=AbortSignal.any([parent,AbortSignal.timeout(timeout*1000)]);
   if(operation==='video_status'){
     if(typeof input.providerTaskId!=='string'||!/^[A-Za-z0-9_-]{1,200}$/.test(input.providerTaskId))fail(400,'MEDIA_REQUEST_INVALID','视频任务编号格式无效');
-    const value=await upstream(context.config,'GET','/api/v3/contents/generations/tasks/'+input.providerTaskId,undefined,signal);
-    if(!record(value)||typeof value.status!=='string')fail(502,'MEDIA_RESULT_INVALID','平台未返回实际视频状态');
+    const value=await upstream(context.config,'GET','/api/v3/contents/generations/tasks/'+input.providerTaskId,undefined,signal,'video');
+    const evidence=mediaEvidence(value,'video',true);
+    if(!record(value)||typeof value.status!=='string'||!['queued','running','succeeded','failed','cancelled','expired'].includes(value.status))
+      fail(502,'MEDIA_RESULT_INVALID','平台未返回可识别的实际视频状态',evidence);
     if(value.status==='succeeded'){
-      if(!record(value.content)||typeof value.content.video_url!=='string'||value.content.video_url.length>8192)fail(502,'MEDIA_RESULT_INVALID','平台标记完成但未返回实际视频文件');
-      return {status:value.status,files:[{url:value.content.video_url,kind:'video',mimeType:'video/mp4',name:'生成视频'}]};
+      if(!record(value.content)||!fileUrl(value.content.video_url))return failedFiles('MEDIA_RESULT_INVALID','平台标记完成但未返回可取回的实际视频文件',evidence);
+      return {status:value.status,files:[{url:value.content.video_url,kind:'video',mimeType:'video/mp4',name:'生成视频'}],...evidence};
     }
     const detail=providerDetail(value.error);
-    return {status:value.status,message:value.status==='failed'?'Coze平台视频生成失败；未提供完成的视频文件。'+(detail?' 原因：'+detail:''):undefined};
+    return {status:value.status,message:value.status==='failed'?'Coze平台视频生成失败；未提供完成的视频文件。'+(detail?' 原因：'+detail:''):undefined,...evidence};
   }
   const kind=operation==='generate_image'?'image':'video';
   const validated=mediaCreateRequest({jobId:'media_bridge',conversationId:'media_bridge',taskId:'media_bridge',kind,
@@ -121,7 +171,7 @@ export async function cozeProjectMediaOperation(operation:unknown,input:unknown,
       ...(p.count!==undefined?{sequentialImageGeneration:p.count>1?'auto':'disabled',sequentialImageGenerationMaxImages:p.count}:{})},expected);
     // SDK0.7.32 silently falls back for 3K. Restore only the explicitly validated actual-model value.
     if(p.size!==undefined)body.size=p.size;
-    const response=await upstream(context.config,'POST','/api/v3/images/generations',body,signal);
+    const response=await upstream(context.config,'POST','/api/v3/images/generations',body,signal,'image');
     return imageFiles(response);
   }
   const referenceMode=p.reference_mode??(images.length===1?'first_frame':'reference_images');
@@ -135,18 +185,25 @@ export async function cozeProjectMediaOperation(operation:unknown,input:unknown,
   const body={model:expected,content,resolution:p.resolution??VideoConfig.DEFAULT_RESOLUTION,ratio:p.ratio??VideoConfig.DEFAULT_RATIO,
     duration:p.duration??VideoConfig.DEFAULT_DURATION,watermark:p.watermark??VideoConfig.DEFAULT_WATERMARK,camerafixed:VideoConfig.DEFAULT_CAMERA_FIXED,
     generate_audio:p.generate_audio??VideoConfig.DEFAULT_GENERATE_AUDIO};
-  const result=await upstream(context.config,'POST','/api/v3/contents/generations/tasks',body,signal);
-  if(!record(result)||typeof result.id!=='string')fail(502,'MEDIA_RESULT_INVALID','平台没有返回实际视频任务编号');
-  return {providerTaskId:result.id,status:result.status??'queued'};
+  const result=await upstream(context.config,'POST','/api/v3/contents/generations/tasks',body,signal,'video');
+  const evidence=mediaEvidence(result,'video',true);
+  if(!record(result)||typeof result.id!=='string'||!/^[A-Za-z0-9_-]{1,200}$/u.test(result.id))
+    return failedFiles('MEDIA_RESULT_INVALID','平台没有返回可查询的实际视频任务编号',evidence);
+  if(result.status!==undefined&&(typeof result.status!=='string'||!['queued','running','succeeded','failed','cancelled','expired'].includes(result.status)))
+    fail(502,'MEDIA_RESULT_INVALID','平台返回的视频任务状态无效',evidence);
+  return {providerTaskId:result.id,status:result.status??'queued',...evidence};
 }
 
 export async function mediaGeneration(request:Request):Promise<Response>{
+  let environment:Awaited<ReturnType<typeof cozeGenerationRuntime>>['environment']|undefined,kind:MediaKind|undefined;
   try{
     const raw=await readAuthenticatedMediaBody(request);if(raw===null)return denyModelCompletion();
     let value:unknown;try{value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw));}catch{fail(400,'MEDIA_REQUEST_INVALID','媒体请求不是有效JSON');}
     if(!record(value)||Object.keys(value).some(key=>!['operation','input'].includes(key)))fail(400,'MEDIA_REQUEST_INVALID','媒体请求格式无效');
-    const result=await cozeProjectMediaOperation(value.operation,value.input,request.signal);
+    kind=value.operation==='generate_image'?'image':value.operation==='generate_video'||value.operation==='video_status'?'video':undefined;
     const context=await cozeGenerationRuntime();
+    environment=context.environment;
+    const result=await cozeProjectMediaOperation(value.operation,value.input,request.signal);
     return Response.json({projectId:PROJECT_ID,environment:context.environment,result},{headers:{'cache-control':'no-store'}});
   }catch(error:unknown){
     let status=503,code='COZE_MEDIA_NOT_READY',message='Coze媒体生成暂不可用';
@@ -155,6 +212,8 @@ export async function mediaGeneration(request:Request):Promise<Response>{
     }else if(record(error)&&typeof error.status==='number'&&typeof error.code==='string'&&typeof error.publicMessage==='string'){
       status=error.status;code=error.code;message=error.publicMessage;
     }
-    return Response.json({error:{code,message}},{status,headers:{'cache-control':'no-store'}});
+    const evidence=record(error)&&record(error.details)?mediaEvidence(error.details.mediaEvidence,kind):{};
+    return Response.json({...(environment?{projectId:PROJECT_ID,environment}:{}),error:{code,message,
+      ...(Object.keys(evidence).length?{details:{mediaEvidence:evidence}}:{})}},{status,headers:{'cache-control':'no-store'}});
   }
 }

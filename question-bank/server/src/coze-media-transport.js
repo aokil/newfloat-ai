@@ -4,6 +4,35 @@ import {MEDIA_BODY_LIMIT} from './assistant-media-contract.js';
 
 const PATH='/internal/media-generation',PROJECT_ID='7689833705046130729';
 const record=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
+// Financial evidence crosses the bridge only as these numeric/enum fields, never raw provider errors.
+const mediaEvidence=(value,kind)=>{
+  if(!record(value))return {};
+  const evidence={},source=value.usage,usage={};
+  const keys=kind==='image'?['generated_images','output_tokens','total_tokens']:['completion_tokens','total_tokens'];
+  let invalid=false;
+  if(record(source))for(const key of keys){
+    const count=source[key];if(count===undefined)continue;
+    if(typeof count!=='number'||!Number.isSafeInteger(count)||count<0){invalid=true;break;}
+    usage[key]=count;
+  }
+  if(!invalid&&Object.keys(usage).length)evidence.usage=usage;
+  const raw=value.providerMetadata,metadata={};
+  if(record(raw)){
+    if(typeof raw.id==='string'&&/^[A-Za-z0-9_-]{1,200}$/u.test(raw.id))metadata.id=raw.id;
+    if(typeof raw.status==='string'&&['queued','running','succeeded','failed','cancelled','expired'].includes(raw.status))metadata.status=raw.status;
+    if(typeof raw.model==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/u.test(raw.model))metadata.model=raw.model;
+    if(typeof raw.generate_audio==='boolean')metadata.generate_audio=raw.generate_audio;
+    if(typeof raw.resolution==='string'&&['480p','720p','1080p'].includes(raw.resolution))metadata.resolution=raw.resolution;
+    if(typeof raw.ratio==='string'&&['16:9','9:16','1:1','4:3','3:4','21:9','adaptive'].includes(raw.ratio))metadata.ratio=raw.ratio;
+    if(typeof raw.duration==='number'&&Number.isFinite(raw.duration)&&raw.duration>0)metadata.duration=raw.duration;
+  }
+  if(Object.keys(metadata).length)evidence.providerMetadata=metadata;
+  return evidence;
+};
+const safeMessage=(value,key)=>typeof value==='string'&&value.length<=600&&!value.includes(key)?value
+  .replace(/[\r\n\t]/gu,' ').replace(/data:[^\s"'<>]+/giu,'[图片数据]').replace(/https?:\/\/[^\s"'<>]+/giu,'[文件地址]')
+  .replace(/\bBearer\s+\S+/giu,'Bearer [隐藏]').replace(/(api[_-]?key|password|secret|token|验证码|密码)\s*[:=]\s*[^\s,;]+/giu,'$1=[隐藏]'):
+  'Coze生成桥接未能完成本次请求';
 
 /** Fixed same-project RPC; no provider key, configurable endpoint or generation retry is exposed to App. */
 export function remoteCozeMedia(config){
@@ -28,12 +57,17 @@ export function remoteCozeMedia(config){
     if(!response.ok){
       const error=record(value.error)?value.error:{};
       const code=typeof error.code==='string'&&/^[A-Z0-9_]{1,100}$/u.test(error.code)?error.code:'COZE_MEDIA_NOT_READY';
-      const message=typeof error.message==='string'&&error.message.length<=600&&!error.message.includes(config.key)?error.message:'Coze生成桥接未能完成本次请求';
-      throw new ApiError(response.status,code,message);
+      const message=safeMessage(error.message,config.key);
+      const evidence=value.projectId===PROJECT_ID&&value.environment===config.environment&&record(error.details)?
+        mediaEvidence(error.details.mediaEvidence,operation==='generate_image'?'image':'video'):{};
+      throw new ApiError(response.status,code,message,Object.keys(evidence).length?{mediaEvidence:evidence}:undefined);
     }
-    if(combined.aborted)throw new ApiError(502,'MEDIA_SUBMISSION_UNKNOWN','Coze生成请求已超时，未交付迟到结果');
     if(value.projectId!==PROJECT_ID||value.environment!==config.environment||!record(value.result))
       throw new ApiError(502,'COZE_MEDIA_IDENTITY_INVALID','Coze生成项目或环境不一致');
-    return value.result;
+    const evidence=mediaEvidence(value.result,operation==='generate_image'?'image':'video');
+    if(combined.aborted)throw new ApiError(502,'MEDIA_SUBMISSION_UNKNOWN','Coze生成请求已超时，未交付迟到结果',
+      Object.keys(evidence).length?{mediaEvidence:evidence}:undefined);
+    const result={...value.result};delete result.usage;delete result.providerMetadata;
+    return {...result,...evidence};
   };
 }

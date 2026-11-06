@@ -14,7 +14,7 @@ const output=(name,args,content=null)=>JSON.stringify({content,tool:{name,argume
 
 test('JSON planning preserves actual tool ids, full arguments and matching results across rounds',()=>{
   const first=prepareCozeAssistant(model,wire());
-  const decided=cozeAssistantJsonResult(output('search_apps',{query:'测试应用'}),first.request);
+  const decided=cozeAssistantJsonResult(output('search_apps',{query:'测试应用'}),first.request,'合成API推理原文');
   const message=decided.choices[0].message,call=message.tool_calls[0];
   assert.equal(call.id,'coze_json_fixture_json_1');
   const receipt=JSON.stringify({ok:true,apps:[{package_name:'com.fixture.example',label:'测试应用'}]});
@@ -23,14 +23,54 @@ test('JSON planning preserves actual tool ids, full arguments and matching resul
   ]));
   assert.equal(next.body.messages.some(item=>item.role==='tool'),false);
   const history=JSON.parse(next.body.messages.find(item=>item.role==='assistant').content);
-  assert.equal(history.tool.id,call.id);
+  assert.deepEqual(Object.keys(history).sort(),['content','tool']);
+  assert.deepEqual(Object.keys(history.tool).sort(),['arguments','name']);
   assert.deepEqual(history.tool.arguments,{query:'测试应用'});
+  const metadataMessage=next.body.messages.find(item=>typeof item.content==='string'&&item.content.startsWith('ASSISTANT_HISTORY_METADATA\n'));
+  assert.deepEqual(JSON.parse(metadataMessage.content.slice('ASSISTANT_HISTORY_METADATA\n'.length)),
+    {tool_call_id:call.id,reasoning_content:'合成API推理原文'});
+  assert.equal(message.reasoning_content,'合成API推理原文');assert.equal(message.tool_calls[0].id,call.id);
   const resultMessage=next.body.messages.find(item=>typeof item.content==='string'&&item.content.startsWith('TOOL_RESULT\n'));
   assert.deepEqual(JSON.parse(resultMessage.content.slice('TOOL_RESULT\n'.length)),{tool_call_id:call.id,content:receipt});
   const second=cozeAssistantJsonResult(output('launch_app',{package_name:'com.fixture.example'}),next.request);
   assert.equal(second.choices[0].message.tool_calls[0].function.name,'launch_app');
   assert.equal(second.planningProtocol,'coze_json_v1');
   assert.equal(second.toolCallIdSource,'adapter');
+});
+
+test('historical assistant examples are accepted by the same current output schema',()=>{
+  const first=prepareCozeAssistant(model,wire());
+  const decided=cozeAssistantJsonResult(output('search_apps',{query:'测试应用'}),first.request,'接口推理');
+  const call=decided.choices[0].message.tool_calls[0];
+  const next=prepareCozeAssistant(model,wire('fixture_round_trip',[
+    {role:'user',content:'查找应用'},decided.choices[0].message,
+    {role:'tool',tool_call_id:call.id,content:'{"success":true}'},
+  ]));
+  const example=next.body.messages.find(item=>item.role==='assistant').content;
+  const result=cozeAssistantJsonResult(example,next.request);
+  assert.equal(result.choices[0].message.tool_calls[0].function.name,'search_apps');
+});
+
+test('ordinary historical replies keep actual reasoning as separate metadata',()=>{
+  const next=prepareCozeAssistant(model,wire('fixture_plain_history',[
+    {role:'user',content:'你好'},
+    {role:'assistant',content:'你好',reasoning_content:'原接口提供的合成推理'},
+    {role:'user',content:'继续'},
+  ]));
+  const example=JSON.parse(next.body.messages.find(item=>item.role==='assistant').content);
+  assert.deepEqual(example,{content:'你好',tool:null});
+  assert(next.body.messages.some(item=>typeof item.content==='string'&&item.content.startsWith('ASSISTANT_HISTORY_METADATA\n')&&
+    JSON.parse(item.content.slice('ASSISTANT_HISTORY_METADATA\n'.length)).reasoning_content==='原接口提供的合成推理'));
+});
+
+test('plan errors distinguish missing fields, extra fields and wrong types without echoing payload keys',()=>{
+  const prepared=prepareCozeAssistant(model,wire());
+  assert.throws(()=>cozeAssistantJsonResult('{"content":"你好"}',prepared.request),/缺少tool/u);
+  assert.throws(()=>cozeAssistantJsonResult('{"tool":null}',prepared.request),/缺少content/u);
+  assert.throws(()=>cozeAssistantJsonResult('{"content":{},"tool":null}',prepared.request),/content字段类型错误/u);
+  const secretKey='synthetic-sensitive-field-name';
+  assert.throws(()=>cozeAssistantJsonResult(JSON.stringify({content:'你好',tool:null,[secretKey]:'not displayed'}),prepared.request),
+    error=>error.code==='MODEL_JSON_PLAN_INVALID'&&/多了1个/u.test(error.message)&&!error.message.includes(secretKey));
 });
 
 test('incomplete JSON, unknown tools and schema-invalid parameters never become executable decisions',()=>{

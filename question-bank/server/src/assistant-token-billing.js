@@ -2,20 +2,11 @@ import {ApiError,sha256} from './security.js';
 import {points} from './account.js';
 import {pointUnits,pointValue,availablePointUnits,availablePoints} from './point-values.js';
 import {assistantTokenUsage,assistantTokenCost,assistantTokenPricing,ASSISTANT_NANOS_PER_CENTIPOINT} from './assistant-token-prices.js';
+import {assistantFinancialAccount,TOKEN_FINANCIAL_PREFIX as PREFIX,MEDIA_FINANCIAL_PREFIX,ASSISTANT_FINANCIAL_ACCOUNT as ACCOUNT} from './assistant-financial-account.js';
+import {assistantMediaBilling} from './assistant-media-billing.js';
 
 // Public confirmations use an HTTP path prefix. Financial records instead use a fixed
 // internal namespace and digested request IDs, never a caller's raw confirmation key.
-const NAMESPACE='assistant_token_internal_v1:'+sha256('assistant-token-record-namespace')+':'+sha256('assistant-token-account-namespace')+':';
-const PREFIX=NAMESPACE+'request:',ACCOUNT=NAMESPACE+'account',ACCOUNT_TYPE='assistant_token_account_v1';
-const decode=row=>{
-  try{
-    const value=JSON.parse(row.result);
-    if(value===null||typeof value!=='object'||!['assistant_token_v1',ACCOUNT_TYPE].includes(value.type))throw new Error('type');
-    if(value.type===ACCOUNT_TYPE&&(!/^\d+$/u.test(value.carryNanos)||BigInt(value.carryNanos)>=ASSISTANT_NANOS_PER_CENTIPOINT||
-      !Array.isArray(value.pending)||value.pending.some(key=>typeof key!=='string'||!key.startsWith(PREFIX))))throw new Error('account');
-    return value;
-  }catch{throw new ApiError(500,'ASSISTANT_BILLING_RECORD_INVALID','对话计费记录无法读取，未重新调用模型');}
-};
 const receipt=(row,user)=>({version:1,mode:'token',state:row.state,requestId:row.requestId,
   pointsCharged:pointValue(row.chargedUnits??0),pointsChargedUnits:row.chargedUnits??0,pointsUnitScale:100,
   pointsAvailable:availablePoints(user),pointsAvailableUnits:availablePointUnits(user),
@@ -26,24 +17,8 @@ const receipt=(row,user)=>({version:1,mode:'token',state:row.state,requestId:row
 
 /** All durable data are financial counters, hashes and snapshots; never prompts, replies or credentials. */
 export function assistantTokenBilling(store){
-  const read=async(owner,key)=>{
-    const row=await store.get('SELECT * FROM confirmations WHERE owner_id=? AND idempotency_key=?',owner,key);
-    return row?{row,value:decode(row)}:null;
-  };
-  const account=async owner=>{
-    const existing=await read(owner,ACCOUNT);
-    if(existing)return existing.value;
-    const value={type:ACCOUNT_TYPE,carryNanos:'0',pending:[]};
-    await store.run('INSERT INTO confirmations(owner_id,idempotency_key,request_hash,result) VALUES(?,?,?,?)',
-      owner,ACCOUNT,ACCOUNT,JSON.stringify(value));
-    return value;
-  };
-  const write=async(owner,key,value)=>store.run('UPDATE confirmations SET result=? WHERE owner_id=? AND idempotency_key=?',JSON.stringify(value),owner,key);
-  const getUser=async owner=>{
-    const user=await store.get('SELECT * FROM users WHERE id=?',owner);
-    if(!user)throw new ApiError(403,'ACCOUNT_DISABLED','账号不可用');
-    return user;
-  };
+  const {read,account,write,getUser}=assistantFinancialAccount(store);
+  const mediaBilling=assistantMediaBilling(store);
   const finish=async(owner,key,{expired=false}={})=>store.transaction(async()=>{
     const found=await read(owner,key);if(!found)throw new ApiError(500,'ASSISTANT_BILLING_RECORD_INVALID','对话计费记录缺失');
     let row=found.value,user=await getUser(owner);
@@ -84,7 +59,10 @@ export function assistantTokenBilling(store){
   });
   const recover=async owner=>{
     const found=await read(owner,ACCOUNT);if(!found)return;
-    for(const key of found.value.pending)await finish(owner,key,{expired:true});
+    for(const key of found.value.pending){
+      if(key.startsWith(MEDIA_FINANCIAL_PREFIX))await mediaBilling.settleKey(owner,key);
+      else await finish(owner,key,{expired:true});
+    }
   };
   const recoverExpired=async()=>{
     const rows=await store.all('SELECT owner_id FROM confirmations WHERE idempotency_key=? AND result LIKE ?',ACCOUNT,'%"pending":["%');
@@ -105,8 +83,13 @@ export function assistantTokenBilling(store){
       const requiredUnits=Number((BigInt(quote.amountNanos)+BigInt(state.carryNanos)+ASSISTANT_NANOS_PER_CENTIPOINT-1n)/ASSISTANT_NANOS_PER_CENTIPOINT);
       if(user.disabled)throw new ApiError(403,'ACCOUNT_DISABLED','账号不可用');
       for(const pendingKey of state.pending){
-        if((await read(owner,pendingKey))?.value.state==='settlement_pending')
-          throw new ApiError(402,'ASSISTANT_POINTS_REQUIRED','已有真实用量待结算，请充值后继续；未下发新的模型请求');
+        const debt=(await read(owner,pendingKey))?.value;
+        if(debt?.state==='settlement_pending'){
+          const media=debt.type==='assistant_media_billing_v1';
+          throw new ApiError(402,'ASSISTANT_POINTS_REQUIRED','已有真实用量待结算，请充值后继续；未下发新的模型请求',media?
+            {pointsBudgetScope:'media',requiredPoints:pointValue(debt.requiredUnits??0),requiredPointsUnits:debt.requiredUnits??0,
+              pointsAvailable:availablePoints(user),pointsAvailableUnits:availablePointUnits(user),pointsUnitScale:100}:undefined);
+        }
       }
       if(availablePointUnits(user)<requiredUnits)throw new ApiError(402,'ASSISTANT_POINTS_REQUIRED',
         `当前点数不足以覆盖保留的单轮预算（需预留${pointValue(requiredUnits)}点，可用${availablePoints(user)}点）。预留不是实际扣费；请充值后继续，未缩减输出预算或调用模型`,
