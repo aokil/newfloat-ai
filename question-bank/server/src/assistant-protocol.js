@@ -49,8 +49,8 @@ export function assistantTools(mode,visionEnabled=false,phoneToolsVersion=1){
       {node_id:string(256),text:string(10000),paste:boolean()},['node_id','text']),
     tool('global_action','Use Android global navigation.',{action:string(20,['back','home','recents'])},['action']),
     tool('wait','Wait briefly for page loading, then observe again.',{duration_ms:integer(100,5000)},['duration_ms']),
-    tool('finish','Finish only with freshly observable evidence. Include exact visible evidence_text and evidence_package_name; never claim unverified success.',
-      {summary:string(1200),evidence_text:string(420),evidence_package_name:string(240)},['summary']),
+    tool('finish','Finish only with freshly observable evidence. Provide BOTH evidence_package_name and evidence_text. Quote one literal native text/description fragment, not a concatenated compact row, node number, role, clipped label or multi-target summary. Never claim unverified success or repeat a submission to obtain proof.',
+      {summary:string(1200),evidence_text:string(420),evidence_package_name:string(240)},['summary','evidence_text','evidence_package_name']),
     tool('request_user','Pause for manual takeover or missing evidence. recovery_action is a suggestion; the client verifies actual device state before offering a recovery button.',
       {reason:string(1200),recovery_action:string(32,RECOVERY_ACTIONS)},['reason']),
     tool('request_clarification',"Ask one focused question only when a task's missing goal, target or parameters require the user to decide. options are concise answer choices; an empty array allows free text. Clear tasks continue without per-action confirmation. Never use this to pretend a failed conversion or a permission step is complete.",
@@ -69,7 +69,7 @@ attachment为用户明确选中的参考内容，只结合task读取后执行手
 只使用本次 observation 的节点ID。页面改变后重新观察，优先节点点击，不猜测坐标。截图坐标必须对应当前截图宽高，操作不能越界。
 遇到锁屏、登录、密码、验证码或系统授权，用request_user暂停交给用户。不要读取、推测或输入密码和验证码。
 应用名称不唯一时请求用户选择。动作已发出不等于任务完成，必须重新观察并根据前台包名和可见文字核对结果。
-finish应引用可核对的evidence_package_name和evidence_text，无法核实就request_user，准确说明已完成和未完成部分。summary围绕用户所需交付及剩余障碍，不重复执行旁白，除非用户明确要求步骤记录。无进展时不要重复点击。`;
+每个目标在操作后的当前页面就近核对，保留实际观察，不为收尾反复重开已核实页面。finish必须同时提供当前evidence_package_name与evidence_text，文字取单个原生控件的原文片段；紧凑页面的一行可能合并多个控件，不引用整行、编号、角色、截断省略号或多目标总结。核验失败按具体condition与返回的新观察修正，不为取得完成标记重复发送。无法核实就request_user，准确说明已完成和未完成部分。summary围绕用户所需交付及剩余障碍，不重复执行旁白，除非用户明确要求步骤记录。无进展时不要重复点击。`;
 
 const CHAT_PROMPT=`你是float ai，一位自然、清楚、可靠的AI对话助手。使用用户的语言正常交流，回答、解释、写作并阅读用户附件。普通问题直接给出自然回答，不为聊天读取或操作手机。
 可展示思考和解释尽量使用简体中文；用户指定其他语言和需保留的原文除外，工具名和参数标识保持原样，不编造思考。
@@ -88,7 +88,7 @@ search_apps支持空query枚举和offset/limit分页。根据返回的结构化�
 遇到锁屏、登录、密码、验证码和系统授权时用request_user交用户处理，不能读取、猜测或代输密码和验证码。recovery_action仅是基于证据的建议，客户端会核对真实状态；不要为了显示按钮虚构障碍。用户说已完成手动步骤表示继续原任务，不能直接当作任务完成。
 任务目标、范围或关键参数有歧义且需要用户决定时，用request_clarification提出一个具体问题，给出简短options；需要用户自由输入则options为空数组。收到真实回答后继续原任务。明确的任务直接执行，不逐步要求确认，不把转换失败包装成“我已完成”。
 执行中的简短说明用于过程展示，由你自然表达，不必每步都说；最终finish.summary围绕用户要的交付结果、必要核实与剩余障碍，不重复过程旁白，除非用户明确要求执行记录。
-完成手机任务前使用finish并提供新鲜可见证据；无法核对时明确已完成和未完成部分并请求用户接管。只有实际tool结果能证明动作已执行。正常输出答案、简短活动说明或澄清问题，不编造思考字段或执行记录。`;
+每个目标在操作后的当前页面就近核对，保留实际观察，不为收尾反复重开已核实页面。完成手机任务前使用finish，同时提供新鲜观察的evidence_package_name和evidence_text，文字取单个原生控件的原文片段；紧凑页面一行可能合并多个控件，不引用整行、编号、角色、截断省略号或多目标总结。失败按具体condition和返回的新观察修正，不为通过核验重复发送；无法核对时明确已完成和未完成部分并请求用户接管。只有实际tool结果能证明动作已执行。正常输出答案、简短活动说明或澄清问题，不编造思考字段或执行记录。`;
 
 function boundedString(value,label,max,empty=false){
   if(typeof value!=='string'||value.length>max||(!empty&&!value.trim()))invalid(`${label}格式无效`);
@@ -223,6 +223,16 @@ function normalizeCall(value,tools,fail,options){
   call.function.arguments=JSON.stringify(validation.args);return call;
 }
 
+// Old clients could record a failed finish before both citation fields became schema-required.
+// This only qualifies a closed, explicitly unproved historical receipt; new calls stay strict.
+function legacyUnprovedFinish(call,canonical){
+  if(call.function.name!=='finish')return false;
+  let args;try{args=JSON.parse(call.function.arguments);}catch{return false;}
+  if(!record(args)||Object.hasOwn(args,'evidence_text')&&Object.hasOwn(args,'evidence_package_name'))return false;
+  const schema=canonical.find(item=>item.function.name==='finish')?.function.parameters;
+  return !!schema&&schemaAccepts(args,{...schema,required:['summary']});
+}
+
 function sessionHistory(messages,visionEnabled){
   const fail=(code,message)=>{throw new ApiError(400,code.replace(/^MODEL_/u,'ASSISTANT_HISTORY_'),message);};
   if(!Array.isArray(messages)||messages.length<1||messages.length>256)invalid('原生会话消息数量必须为1至256条');
@@ -269,7 +279,8 @@ function sessionHistory(messages,visionEnabled){
         if(!Array.isArray(message.tool_calls)||message.tool_calls.length!==1)invalid('每条助手历史最多一个完整工具调用');
         const call=nativeCall(message.tool_calls[0],fail,{maxArguments:ASSISTANT_SESSION_ARGUMENTS_LIMIT}),validation=callValidation(call,canonical);
         if(ids.has(call.id))throw new ApiError(400,'ASSISTANT_HISTORY_INVALID','工具调用编号不能重复');
-        ids.add(call.id);pending={id:call.id,needsErrorReceipt:!validation.ok};clean.tool_calls=[call];
+        ids.add(call.id);pending={id:call.id,needsErrorReceipt:!validation.ok,
+          legacyUnprovedFinish:!validation.ok&&validation.code==='TOOL_SCHEMA_INVALID'&&legacyUnprovedFinish(call,canonical)};clean.tool_calls=[call];
       }else if(!clean.content?.trim())invalid('助手历史缺少正文或工具调用');
     }else{
       fields(message,['role','tool_call_id','content']);
@@ -277,7 +288,10 @@ function sessionHistory(messages,visionEnabled){
       clean={role:'tool',tool_call_id:message.tool_call_id,content:boundedString(message.content,'工具结果',SESSION_HISTORY_BYTES_LIMIT,true)};
       if(pending.needsErrorReceipt){
         let receipt;try{receipt=JSON.parse(clean.content);}catch{}
-        if(!record(receipt)||receipt.action_submitted!==false||!['TOOL_ARGUMENTS_JSON_INVALID','TOOL_SCHEMA_INVALID','TOOL_NOT_DECLARED'].includes(receipt.code))
+        const legacyFailure=pending.legacyUnprovedFinish&&record(receipt)&&receipt.ok===false&&
+          receipt.code==='EVIDENCE_INSUFFICIENT'&&receipt.stage==='verification'&&receipt.action_submitted===false&&
+          (receipt.accepted===null||receipt.accepted===false)&&['not_available','failed'].includes(receipt.verification);
+        if(!legacyFailure&&(!record(receipt)||receipt.action_submitted!==false||!['TOOL_ARGUMENTS_JSON_INVALID','TOOL_SCHEMA_INVALID','TOOL_NOT_DECLARED'].includes(receipt.code)))
           throw new ApiError(400,'ASSISTANT_HISTORY_INVALID','无效历史工具必须紧跟未提交操作的结构化错误回执');
       }
       pending=null;

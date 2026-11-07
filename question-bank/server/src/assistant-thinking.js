@@ -4,6 +4,8 @@ import {ApiError} from './security.js';
 // deliberately never choose a protocol. Unknown bindings retain provider defaults only.
 const defaults=['provider_default'],toggle=['provider_default','enabled','disabled'],fixed=['provider_default','enabled'];
 const variableEfforts=['provider_default','low','high'];
+const deepseekEfforts=['provider_default','low','high','max'];
+const requestEfforts=['provider_default','low','high','max'];
 const has=(model,values)=>values.includes(model);
 const fail=message=>{throw new ApiError(422,'THINKING_CONFIGURATION_UNSUPPORTED',message);};
 const record=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
@@ -33,7 +35,7 @@ export function assistantThinkingProfile(config={}){
       defaultMode:isFixed?'enabled':'provider_default',defaultEffort:'provider_default',
       style:isFixed?'coze_json_fixed':'coze_json',maxOutputTokensLimit:null};
   }
-  if(provider==='deepseek'&&has(modelId,['deepseek-flash','deepseek-v4-pro']))return profile('deepseek',{efforts:variableEfforts,defaultEffort:'high'});
+  if(provider==='deepseek'&&has(modelId,['deepseek-flash','deepseek-v4-pro']))return profile('deepseek',{efforts:deepseekEfforts,defaultEffort:'high'});
   if(provider==='qwen'&&has(modelId,['qwen3.5-plus','qwen3.5-plus-2026-02-15','qwen3.5-plus-2026-04-20','qwen3.5-flash','qwen3.5-flash-2026-02-23']))return profile('qwen');
   if(provider==='qwen'&&has(modelId,['qwen-plus','qwen-plus-latest','qwen-plus-2025-04-28','qwen-flash','qwen-flash-2025-07-28']))return profile('qwen',{defaultMode:'disabled'});
   if(provider==='glm'&&has(modelId,['glm-5.3','glm-5.3-flash']))return profile('glm',{modes:fixed,efforts:variableEfforts,defaultEffort:'max',fixed:true,reason:'该型号固定开启思考，不能关闭'});
@@ -54,7 +56,7 @@ export function assistantThinkingRequest(body){
   const choice=body.thinking??{};
   if(!record(choice)||Object.keys(choice).some(key=>!['mode','effort'].includes(key)))throw new ApiError(400,'ASSISTANT_THINKING_INVALID','思考配置格式无效');
   const mode=choice.mode??'provider_default',effort=choice.effort??'provider_default',maxOutputTokens=body.maxOutputTokens??0;
-  if(!toggle.includes(mode)||!variableEfforts.includes(effort))throw new ApiError(400,'ASSISTANT_THINKING_INVALID','思考模式或档位无效');
+  if(!toggle.includes(mode)||!requestEfforts.includes(effort))throw new ApiError(400,'ASSISTANT_THINKING_INVALID','思考模式或档位无效');
   if(!Number.isSafeInteger(maxOutputTokens)||maxOutputTokens<0||maxOutputTokens>524288)throw new ApiError(400,'ASSISTANT_OUTPUT_BUDGET_INVALID','输出预算须为官方默认（0）或1至524288整数，同时受实际型号限制');
   const expectedModelId=body.expectedModelId;
   if(expectedModelId!==undefined&&(typeof expectedModelId!=='string'||!expectedModelId||expectedModelId.length>200||/[\r\n\0]/u.test(expectedModelId)))throw new ApiError(400,'ASSISTANT_THINKING_INVALID','实际模型校验信息无效');
@@ -69,7 +71,8 @@ export function applyAssistantThinking(config,request,body){
   if(!profile.modes.includes(mode))fail(`该实际型号不能执行所选思考模式：${mode}。${profile.reason}`);
   if(!profile.efforts.includes(effort))fail(`该实际型号不支持所选思考档位：${effort}。${profile.reason}`);
   if(mode==='disabled'&&effort!=='provider_default')fail('关闭思考时不能同时指定思考档位，请改为默认档位');
-  if(['deepseek','glm','doubao'].includes(profile.style)&&mode!=='provider_default')body.thinking={type:mode};
+  if(profile.style==='deepseek'&&(mode!=='provider_default'||effort==='max'))body.thinking={type:mode==='provider_default'?'enabled':mode};
+  if(['glm','doubao'].includes(profile.style)&&mode!=='provider_default')body.thinking={type:mode};
   if(profile.style==='coze_json'&&mode!=='provider_default')body.thinking={type:mode};
   if(profile.style==='coze_json_fixed')body.thinking={type:'enabled'};
   if(profile.style==='qwen'&&mode!=='provider_default')body.enable_thinking=mode==='enabled';
@@ -77,7 +80,8 @@ export function applyAssistantThinking(config,request,body){
     body.reasoning_split=true;
     if(profile.style==='minimax_adaptive'&&mode!=='provider_default')body.thinking={type:mode==='enabled'?'adaptive':'disabled'};
   }
-  if(effort!=='provider_default')body.reasoning_effort=effort;
+  if(mode==='disabled')delete body.reasoning_effort;
+  else if(effort!=='provider_default')body.reasoning_effort=effort;
   if(profile.style==='glm'&&mode!=='disabled'&&has(profile.modelId,['glm-5.3','glm-5.3-flash','glm-5.2','glm-5.1','glm-5','glm-4.7'])){
     body.thinking??={type:'enabled'};body.thinking.clear_thinking=false;
   }
