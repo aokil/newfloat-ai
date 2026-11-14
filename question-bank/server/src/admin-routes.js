@@ -1,4 +1,4 @@
-import {ApiError,fields,text,id,sha256,authenticate} from './security.js';
+import {ApiError,fields,text,id,sha256,authenticate,phoneNumber,newPassword,hashPassword,verifyPassword} from './security.js';
 import {userInfo,points} from './account.js';
 import {modelConfig,modelView,sealKey,modelSecret,environmentModelKeyFingerprint,officialModelTest,providerFailureCode} from './models.js';
 import {precisePointsRequest} from './point-values.js';
@@ -10,6 +10,34 @@ function timestamp(value){if(value===null||value===undefined)return null;const n
 const modelFields=['execution','provider','displayName','modelId','baseUrl','apiKey','removeKey','enabled','capabilities','maxOutputTokens','timeoutMs','dailyRequestLimit','pointsPerCall','catalogKey','expectedRevision'];
 export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,baichuanApiKey=null,deepseekApiKey=null,modelTransport=officialModelTest,cozeBridge=null}){
   const sqlPage=async(req,sql,args=[])=>{const limit=integer(req.query.limit,50,1,200),offset=integer(req.query.cursor,0,0,100000000);const rows=await store.all(sql+' LIMIT ? OFFSET ?',...args,limit+1,offset);return {items:rows.slice(0,limit),nextCursor:rows.length>limit?String(offset+limit):null};};
+  app.post('/v1/admin/users',{preHandler:admin},async req=>{
+    fields(req.body,['phoneNumber','password','passwordConfirmation','displayName','reason']);
+    const phone=phoneNumber(req.body.phoneNumber),password=newPassword(req.body.password,req.body.passwordConfirmation,true);
+    const displayName=req.body.displayName===undefined?phone:text(req.body.displayName,'显示名',1,128);
+    const reason=text(req.body.reason,'创建原因',1,2000);
+    // Keep passwords and fast password fingerprints out of idempotency storage.
+    // Replays prove the same password against the account's existing scrypt hash.
+    const digest=sha256(JSON.stringify({phone,displayName,reason}));
+    const replayResult=async result=>{
+      const existing=await store.get('SELECT password_hash FROM users WHERE id=?',result.userId);
+      if(!existing||!await verifyPassword(password,existing.password_hash))throw new ApiError(409,'IDEMPOTENCY_CONFLICT','创建请求已完成，密码不一致或已修改，请在用户列表核对');
+      return result;
+    };
+    const replay=await idem(req,digest);
+    if(replay)return await replayResult(replay);
+    if(await store.get('SELECT id FROM users WHERE username=? OR phone_number=?',phone,phone))throw new ApiError(409,'VERSION_CONFLICT','手机号已注册，请在用户列表核对');
+    const hash=await hashPassword(password);let created=false;
+    const result=await idem(req,digest,async()=>{
+      if(await store.get('SELECT id FROM users WHERE username=? OR phone_number=?',phone,phone))throw new ApiError(409,'VERSION_CONFLICT','手机号已注册，请在用户列表核对');
+      const userId=id('u'),now=Date.now();
+      await store.run('INSERT INTO users(id,username,display_name,password_hash,role,created_at,phone_number,phone_verified,trial_started,trial_ends) VALUES(?,?,?,?,?,?,?,?,?,?)',userId,phone,displayName,hash,'user',now,phone,0,now,now+900000);
+      await points(store,await store.get('SELECT * FROM users WHERE id=?',userId),10,null,'首次注册赠送','registration-gift');
+      await store.audit(req.auth.user_id,'admin-create-user',userId,{reason,phoneVerified:false});
+      created=true;
+      return await userInfo(store,await store.get('SELECT * FROM users WHERE id=?',userId));
+    });
+    return created?result:await replayResult(result);
+  });
   app.get('/v1/admin/users',{preHandler:admin},async req=>{
     const where=[],args=[];
     if(req.query.search){where.push('(phone_number LIKE ? ESCAPE \'!\' OR display_name LIKE ? ESCAPE \'!\')');const value='%'+text(req.query.search,'search',1,128).replace(/[!%_]/gu,'!$&')+'%';args.push(value,value);}
