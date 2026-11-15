@@ -31,6 +31,7 @@ function fixture({version=11,precise=false,live=false,invalid=false,corrupt=fals
       return {rows};
     }
     if(sql.startsWith('ALTER TABLE ')){types.set(/^ALTER TABLE (\w+)/u.exec(sql)[1],'numeric');altered=true;}
+    if(sql.startsWith('CREATE TABLE phone_provider_settings'))tables.add('phone_provider_settings');
     if(sql.startsWith('CREATE TABLE user_feedback')){tables.add('user_feedback');tables.add('app_promotions');}
     if(sql.startsWith('UPDATE schema_metadata'))marker=params[0];
     return {rows:[]};
@@ -46,7 +47,7 @@ function fixture({version=11,precise=false,live=false,invalid=false,corrupt=fals
 
 test('real Postgres initializer repairs known BIGINT drift even when marker already equals 11',async()=>{
   const f=fixture();await f.store._initialize();
-  assert.equal(f.store.schemaVersion,11);assert.equal(f.marker(),11);assert.equal(f.structureChecks(),2);
+  assert.equal(f.store.schemaVersion,12);assert.equal(f.marker(),12);assert.equal(f.structureChecks(),2);
   const ddl=f.log.filter(x=>x.sql.startsWith('ALTER TABLE'));
   assert.equal(ddl.length,3);assert(ddl.every(x=>x.sql.includes('NUMERIC(18,2)')&&!x.sql.includes('*100')));
   assert.equal(f.log.at(-1).sql,'COMMIT');
@@ -58,10 +59,10 @@ test('healthy precise schema initializes without repair locks or monetary DDL',a
   assert.equal(f.structureChecks(),0);assert(!f.log.some(x=>x.sql.startsWith('ALTER TABLE')||x.sql.startsWith('LOCK TABLE')));
   assert.equal(f.log.at(-1).sql,'COMMIT');
 });
-test('DEV marker9 applies the actual missing migrations before advancing marker11',async()=>{
+test('DEV marker9 applies the actual missing migrations before advancing marker12',async()=>{
   const f=fixture({version:9});await f.store._initialize();
   assert(f.log.some(x=>x.sql.startsWith('CREATE TABLE user_feedback')));
-  assert.equal(f.marker(),11);assert.equal(f.store.schemaVersion,11);assert.equal(f.structureChecks(),0);
+  assert.equal(f.marker(),12);assert.equal(f.store.schemaVersion,12);assert.equal(f.structureChecks(),0);
   assert.equal(f.log.at(-1).sql,'COMMIT');
 });
 test('live requests, invalid amounts or failed full-structure guard abort without ALTER',async()=>{
@@ -87,6 +88,6 @@ test('post-conversion financial or full-structure mismatch rolls the initializer
   }
 });
 test('future schema marker remains a hard failure without repair DDL',async()=>{
-  const f=fixture({version:12});await assert.rejects(()=>f.store._initialize(),/newer/u);
+  const f=fixture({version:13});await assert.rejects(()=>f.store._initialize(),/newer/u);
   assert.equal(f.log.at(-1).sql,'ROLLBACK');assert(!f.log.some(x=>x.sql.startsWith('ALTER TABLE')));
 });

@@ -153,3 +153,5 @@ html:has(dialog[open]){overflow:hidden}dialog{width:min(720px,calc(100% - 32px))
 }
 @media(max-height:600px){.auth-scene{--auth-card-bottom:32px}.auth-content{padding-top:76px}.auth-brand{position:absolute}.auth-hero{top:28%}.auth-entry{top:76%}.auth-panel{max-height:calc(100dvh - 108px)}.auth-field{margin-bottom:10px}.auth-submit{margin-top:12px}}
 @media(prefers-reduced-motion:reduce){.auth-bubble,.auth-panel{animation:none}.auth-bubbles,.auth-hero,.auth-brand,.auth-field-label{transition:none}}
+
+.phone-provider-settings{max-width:42rem;display:grid;gap:1rem}.phone-provider-settings>p{margin:0}.phone-provider-availability{display:grid;gap:.5rem}.phone-provider-availability>.row{justify-content:space-between;gap:1rem}.phone-provider-settings .field{min-width:0}

@@ -3,11 +3,12 @@ import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ensureDatabaseEnvironment, ensureSupabaseEnvironment } from 'coze-coding-dev-sdk';
+import { ensureDatabaseEnvironment } from 'coze-coding-dev-sdk';
 import type { SupabaseEnvironment } from 'coze-coding-dev-sdk';
 import { nativeModelBridge } from './native-model-bridge.server';
 import { verifiedCozeProjectRuntimeContext } from './coze-llm.server';
 import { getInjectedProjectResources, getWorkloadProjectResources } from './coze-workload.server';
+import { COZE_PHONE_BINDING_NAMES } from '../../question-bank/server/src/coze-phone-config.js';
 
 const PROJECT_ID = '7689833705046130729';
 const STATE_KEY = Symbol.for('float-ai.native-backend.7689833705046130729.v1');
@@ -59,7 +60,7 @@ function runtimeBindingHash(): string {
     'BOOTSTRAP_ADMIN_PHONE', 'PGDATABASE_URL_DEV', 'PGDATABASE_URL_PROD', 'TIYU_SUPABASE_URL_DEV',
     'TIYU_SUPABASE_URL_PROD', 'TIYU_SUPABASE_ANON_KEY_DEV', 'TIYU_SUPABASE_ANON_KEY_PROD',
     'ALIPAY_ENABLED', 'ALIPAY_ENVIRONMENT', 'ALIPAY_APP_ID', 'ALIPAY_SELLER_ID', 'ALIPAY_NOTIFY_URL',
-    'ALIPAY_APP_PRIVATE_KEY', 'ALIPAY_PUBLIC_KEY', 'BAICHUAN_API_KEY', 'DEEPSEEK_API_KEY', 'NODE_DEBUG'];
+    'ALIPAY_APP_PRIVATE_KEY', 'ALIPAY_PUBLIC_KEY', 'BAICHUAN_API_KEY', 'DEEPSEEK_API_KEY', 'NODE_DEBUG',...COZE_PHONE_BINDING_NAMES];
   return createHash('sha256').update(JSON.stringify(names.map(name => [name, process.env[name] ?? null]))).digest('hex');
 }
 
@@ -99,9 +100,9 @@ export function getNativeBackend(): Promise<FastifyInstance> {
     if (runtimeBindingHash() !== authorizedBinding) throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     const injectedResources = getInjectedProjectResources();
     stage = production ? 'injected-resources' : 'workload-resources';
-    if (production && (!injectedResources?.databaseUrl || !injectedResources.phoneConfiguration))
+    if (production && !injectedResources?.databaseUrl)
       throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
-    const workloadResources = production || (injectedResources?.databaseUrl && injectedResources.phoneConfiguration)
+    const workloadResources = production || injectedResources?.databaseUrl
       ? null : await getWorkloadProjectResources();
     stage = 'database-configuration';
     // SDK 0.7.32 checks .env only; Coze may inject the scoped URL into the
@@ -118,8 +119,8 @@ export function getNativeBackend(): Promise<FastifyInstance> {
     const phoneConfiguration = injectedResources?.phoneConfiguration || workloadResources?.phoneConfiguration;
     const phone = phoneConfiguration
       ? { ...phoneConfiguration, context: { root: process.cwd(), projectId: PROJECT_ID } }
-      : production ? undefined : await ensureSupabaseEnvironment().catch(() => undefined);
-    if ((production && !phone) || (phone && phone.context.projectId !== PROJECT_ID))
+      : undefined;
+    if (phone && phone.context.projectId !== PROJECT_ID)
       throw new Error('COZE_PROJECT_IDENTITY_UNAVAILABLE');
     // Keep the existing ESM backend unbundled: parser workers and public files
     // resolve their own import.meta.url in both preview and production.

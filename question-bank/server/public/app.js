@@ -277,8 +277,8 @@ function accountHeader(){if(!session)return;const a=session.account||{};const ac
 async function updateMe(){const me=await api('/v1/me');session={...session,...me};accountHeader();}
 function signedIn(next){disposeAuthScene();shell.classList.remove('signed-out');epoch++;session=next;web.loadPreferences();accountHeader();buildNav();void perform(async()=>{await show('banks');const saved=epoch;const data=await api('/v1/announcements');if(saved!==epoch||!data.items.length)return;const a=data.items[0];let box;box=dialog(a.title,[el('div',{class:'pre'},a.body),el('p',{class:'muted'},'')],'此版本不再提醒',async()=>{await api(`/v1/announcements/${a.id}/dismiss`,{method:'POST',body:{version:a.version}});notify('已设置当前版本不再提醒');});});}
 function buildNav(){nav?.remove();nav=el('nav',{'aria-label':'主导航',class:'main-nav'});const links=[['search','搜题'],['banks','题库'],['profile','我的']];if(session.principal.roles.includes('admin'))links.push(['users','管理']);for(const[key,label]of links){const b=button(label,()=>show(key));b.dataset.page=key;nav.append(b);}shell.prepend(nav);}
-function sectionFor(name){return ['users','review','releases','models','manageAnnouncements','audit'].includes(name)?'users':['banks','imports'].includes(name)?'banks':['search','userModels','modelSettings','byok'].includes(name)?'search':'profile';}
-function secondaryNav(name){const group=sectionFor(name);const groups={banks:[],search:[],users:[['users','用户管理'],['review','题库审核'],['releases','发布记录'],['models','AI 模型'],['manageAnnouncements','公告管理'],['audit','操作日志']],profile:[]};const links=groups[group]||[];const tabs=links.map(([key,label])=>{const b=button(label,()=>show(key),name===key?'selected':'');b.dataset.page=key;if(name===key)b.setAttribute('aria-current','page');return b;});$('subnav').className=group==='users'?'admin-subnav':'';if(group==='users'){const picker=select('管理分区',Object.fromEntries(links),name);picker.node.classList.add('subnav-select');picker.input.addEventListener('change',()=>{const page=picker.input.value;void perform(()=>show(page));});tabs.push(picker.node);}$('subnav').replaceChildren(...tabs);document.querySelectorAll('.main-nav button').forEach(b=>{b.classList.toggle('selected',b.dataset.page===group);if(b.dataset.page===group)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});}
+function sectionFor(name){return ['users','review','releases','models','phoneProvider','manageAnnouncements','audit'].includes(name)?'users':['banks','imports'].includes(name)?'banks':['search','userModels','modelSettings','byok'].includes(name)?'search':'profile';}
+function secondaryNav(name){const group=sectionFor(name);const groups={banks:[],search:[],users:[['users','用户管理'],['review','题库审核'],['releases','发布记录'],['models','AI 模型'],['phoneProvider','短信服务'],['manageAnnouncements','公告管理'],['audit','操作日志']],profile:[]};const links=groups[group]||[];const tabs=links.map(([key,label])=>{const b=button(label,()=>show(key),name===key?'selected':'');b.dataset.page=key;if(name===key)b.setAttribute('aria-current','page');return b;});$('subnav').className=group==='users'?'admin-subnav':'';if(group==='users'){const picker=select('管理分区',Object.fromEntries(links),name);picker.node.classList.add('subnav-select');picker.input.addEventListener('change',()=>{const page=picker.input.value;void perform(()=>show(page));});tabs.push(picker.node);}$('subnav').replaceChildren(...tabs);document.querySelectorAll('.main-nav button').forEach(b=>{b.classList.toggle('selected',b.dataset.page===group);if(b.dataset.page===group)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});}
 async function signOut(){const old=session;clearSession();try{await raw('/v1/auth/logout',{method:'POST',body:{refreshToken:old.refreshToken,clientId:'web'}});}finally{notify('已退出');}}
 function disposeAuthScene(){authScene?.dispose();authScene=null;document.body.classList.remove('auth-screen');}
 function createAuthScene(){
@@ -389,6 +389,46 @@ const bankBrowser=window.TiyuBankBrowser({
 async function confirmImport(info){const banks=(await allBanks()).filter(b=>b.visibility==='private'),title=field('题库名称','text',info.title),target=select('保存方式',{'':'新建个人题库',...Object.fromEntries(banks.map(b=>[b.bankId,'替换：'+b.title]))},'');const key=crypto.randomUUID();dialog('确认个人入库',[el('p',{class:'muted'},'个人题库仅你和管理员可见。替换私库不影响已发布版本。'),title.node,target.node],'确认私人入库',async()=>{const body={expectedRevision:info.revision,title:inputValue(title)};if(inputValue(target)){const bank=banks.find(b=>b.bankId===inputValue(target));body.bankId=bank.bankId;body.expectedBankVersion=bank.dataVersion;}await mutation(`/v1/imports/${info.importId}/confirm`,body,'POST',key);notify('已入库，App更新后可查。');await show('banks');});}
 async function download(path){const token=session?.accessToken;if(!token)throw Error('请先登录');const saved=epoch;const response=await fetch(path,{headers:{Authorization:'Bearer '+token},cache:'no-store',credentials:'omit',redirect:'error'});if(!response.ok)throw Error('原件下载失败；请刷新登录状态后重试');const blob=await response.blob();if(saved!==epoch)throw Error('账号已改变');const url=URL.createObjectURL(blob),a=el('a',{href:url,download:'题库原件'});document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 const pages={
+phoneProvider:async alive=>{
+  const initial=await api('/v1/admin/phone-provider');if(!alive())return;
+  heading('短信服务','选择注册和找回密码使用的验证码通道。');
+  let state=initial,requestKey=null,pending=false;
+  const current=el('p',{role:'status'}),availability=el('div',{class:'phone-provider-availability'});
+  const choice=select('短信通道',Object.fromEntries(state.providers.map(p=>[p.provider,p.displayName])),state.provider||'');
+  const error=el('p',{class:'error-text',role:'alert'});
+  const save=button('切换通道',async()=>{
+    pending=true;error.textContent='';update();
+    try{
+      requestKey??=crypto.randomUUID();
+      state=await mutation('/v1/admin/phone-provider',{provider:inputValue(choice),expectedRevision:state.revision},'PUT',requestKey);
+      requestKey=null;if(!alive())return;render();notify('短信通道已切换，新验证码立即使用所选通道');
+    }catch(e){if(alive())showFormError(error,e.message);}
+    finally{pending=false;if(alive())update();}
+  },'primary');
+  const refresh=button('刷新状态',async()=>{
+    pending=true;error.textContent='';update();
+    try{state=await api('/v1/admin/phone-provider');requestKey=null;if(alive())render();}
+    catch(e){if(alive())showFormError(error,e.message);}
+    finally{pending=false;if(alive())update();}
+  });
+  function update(){
+    choice.input.disabled=pending;refresh.disabled=pending;
+    const selected=state.providers.find(p=>p.provider===inputValue(choice));
+    save.disabled=pending||!selected?.configured||selected.provider===state.provider;
+  }
+  function render(){
+    const active=state.providers.find(p=>p.provider===state.provider);
+    current.textContent='当前通道：'+(active?.displayName||'未配置')+(state.ready?'':' · 不可用');
+    availability.replaceChildren(...state.providers.map(p=>el('div',{class:'row'},el('span',{},p.displayName),pill(p.configured?'已配置':'未配置',p.configured?'good':''))));
+    choice.input.value=state.provider||'';
+    for(const option of choice.input.options)option.disabled=!state.providers.find(p=>p.provider===option.value)?.configured;
+    update();
+  }
+  choice.input.addEventListener('change',()=>{requestKey=null;error.textContent='';update();});
+  main.append(el('section',{class:'phone-provider-settings'},current,availability,choice.node,
+    el('p',{class:'muted'},'已发送的验证码继续由原通道核验，有效期内仍可使用。'),error,el('div',{class:'row'},save,refresh)));
+  render();
+},
 profile:alive=>web.pages.profile(alive),
 banks:alive=>web.pages.banks(alive),
 imports:alive=>web.pages.imports(alive),

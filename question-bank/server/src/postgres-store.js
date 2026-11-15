@@ -4,17 +4,17 @@ import {pointUnits} from './point-values.js';
 import {migratePostgresPointPrecision,assertPostgresPointPrecision,ensurePostgresPointPrecision} from './point-precision-migration.js';
 
 const {Pool, types} = pg;
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 // All instances share these transaction locks, including single-statement writes.
 const LOCK_NAMESPACE = 1179406145;
 const WRITE_LOCK = 1413564759;
 const MIGRATION_LOCK = 1413564749;
 const APPLICATION_TABLES = ['users','sessions','used_refresh','imports','banks','private_versions','confirmations',
   'reviews','releases','audit','points_ledger','sms_challenges','sms_failures','models','model_tests',
-  'announcements','announcement_dismissals','external_phone_identities','ai_requests','payment_orders','user_feedback','app_promotions'];
+  'announcements','announcement_dismissals','external_phone_identities','ai_requests','payment_orders','user_feedback','app_promotions','phone_provider_settings'];
 
 // Coze can copy newer DDL while preserving an older production version marker.
-// Accept copied structures only after checking the complete version-8/9/10/11 contract;
+// Accept copied structures only after checking the complete version-8/9/10/11/12 contract;
 // the no-marker recovery additionally requires every business table to be empty.
 const SCHEMA_8_COLUMNS = {
   users:'id:text username:text display_name:text password_hash:text role:text disabled:integer created_at:bigint phone_number:text? phone_verified:integer last_login_at:bigint? membership:text membership_expires:bigint? trial_started:bigint trial_ends:bigint points_balance:bigint points_reserved:bigint revision:integer avatar_id:text?',
@@ -249,13 +249,14 @@ function normalizedDefinition(sql) {
 
 /** Read-only structural preflight; never writes markers, DDL or business rows. */
 export async function assertCopiedApplicationStructure(client, schema) {
-  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete version-8, version-9, version-10 or version-11 application schema');};
+  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete version-8, version-9, version-10, version-11 or version-12 application schema');};
   const existing = await client.query('SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname=$1',[schema]);
   const names = new Set(existing.rows.map(row => row.tablename));
-  const payment=names.has('payment_orders'),community=names.has('user_feedback')||names.has('app_promotions');
+  const payment=names.has('payment_orders'),community=names.has('user_feedback')||names.has('app_promotions'),phone=names.has('phone_provider_settings');
   let copiedVersion=community?10:payment?9:8;
   if(community&&!payment)fail();
-  const tableNames = [...APPLICATION_TABLES.filter(name=>(community||!['user_feedback','app_promotions'].includes(name))&&(name!=='payment_orders'||payment)),'schema_metadata'];
+  if(phone&&!community)fail();
+  const tableNames = [...APPLICATION_TABLES.filter(name=>(community||!['user_feedback','app_promotions'].includes(name))&&(name!=='payment_orders'||payment)&&(name!=='phone_provider_settings'||phone)),'schema_metadata'];
   const columnContract={...SCHEMA_8_COLUMNS,...(payment?{payment_orders:PAYMENT_COLUMNS}:{}),...(community?{
     user_feedback:'id:text user_id:text body:text created_at:bigint',app_promotions:'id:text revision:integer content:text updated_at:bigint updated_by:text'}:{})};
   const primaryContract={...SCHEMA_8_PRIMARY,...(payment?{payment_orders:'id'}:{}),...(community?{user_feedback:'id',app_promotions:'id'}:{})};
@@ -263,6 +264,13 @@ export async function assertCopiedApplicationStructure(client, schema) {
   const foreignContract={...SCHEMA_8_FOREIGN,...(payment?{payment_orders:{owner_id:'users.id'}}:{}),...(community?{user_feedback:{user_id:'users.id'},app_promotions:{updated_by:'users.id'}}:{})};
   const checkContract={...SCHEMA_8_CHECKS,...(payment?{payment_orders:PAYMENT_CHECKS}:{})};
   const indexContract={...SCHEMA_8_INDEXES,...(payment?{payment_orders_owner:['payment_orders','owner_id,created_at'],payment_orders_pending:['payment_orders','status,expires_at']}:{}),...(community?{user_feedback_time:['user_feedback','created_at,id']}:{})};
+  if(phone){
+    columnContract.phone_provider_settings='environment:text provider:text revision:integer updated_at:bigint updated_by:text';
+    primaryContract.phone_provider_settings='environment';
+    foreignContract.phone_provider_settings={updated_by:'users.id'};
+    checkContract.phone_provider_settings=["environment IN ('DEV','PROD')","provider IN ('supabase','aliyun_pnvs')",'revision>0'];
+    uniqueContract.external_phone_identities=['issuer,user_id'];
+  }
   if (tableNames.some(name => !names.has(name))) fail();
   const columns = await client.query(`SELECT table_name,column_name,data_type,numeric_precision,numeric_scale,is_nullable,column_default,is_identity,identity_generation
     FROM information_schema.columns WHERE table_schema=$1 AND table_name=ANY($2::text[])`,[schema,tableNames]);
@@ -274,6 +282,7 @@ export async function assertCopiedApplicationStructure(client, schema) {
     if(money.length!==6||money.some(row=>row.data_type!=='numeric'||Number(row.numeric_precision)!==18||Number(row.numeric_scale)!==2))fail();
     copiedVersion=11;
   }
+  if(phone)copiedVersion=12;
   for (const [table,specification] of Object.entries(columnContract)) {
     const actual = columns.rows.filter(row => row.table_name === table);
     const expected = specification.split(' ').map(column => {const [name,type] = column.split(':'); return {name,type:type.replace(/\?$/u,''),nullable:type.endsWith('?')};});
@@ -350,7 +359,7 @@ export async function assertCopiedApplicationStructure(client, schema) {
     if (paymentUnique.size !== 3 || !paymentUnique.has('id') ||
       !paymentUnique.has('owner_id,idempotency_hash') || !paymentUnique.has('environment,trade_no')) fail();
   }
-  if(community) for(const table of ['user_feedback','app_promotions']) {
+  if(community) for(const table of ['user_feedback','app_promotions',...(phone?['phone_provider_settings']:[])]) {
     const own=indexes.rows.filter(row=>row.table_name===table);
     if(own.length!==(table==='user_feedback'?2:1))fail();
     for(const index of own)if(index.access_method!=='btree'||index.indnatts!==index.indnkeyatts||index.sort_options.some(option=>option!==0)||
@@ -459,7 +468,17 @@ CREATE INDEX payment_orders_owner ON payment_orders(owner_id,created_at);
 CREATE INDEX payment_orders_pending ON payment_orders(status,expires_at);`,
   10: `CREATE TABLE user_feedback(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),body TEXT NOT NULL,created_at BIGINT NOT NULL);
 CREATE INDEX user_feedback_time ON user_feedback(created_at,id);
-CREATE TABLE app_promotions(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,content TEXT NOT NULL,updated_at BIGINT NOT NULL,updated_by TEXT NOT NULL REFERENCES users(id));`
+CREATE TABLE app_promotions(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,content TEXT NOT NULL,updated_at BIGINT NOT NULL,updated_by TEXT NOT NULL REFERENCES users(id));`,
+  12: `CREATE TABLE phone_provider_settings(environment TEXT PRIMARY KEY CHECK(environment IN ('DEV','PROD')),
+provider TEXT NOT NULL CHECK(provider IN ('supabase','aliyun_pnvs')),revision INTEGER NOT NULL CHECK(revision>0),
+updated_at BIGINT NOT NULL,updated_by TEXT NOT NULL REFERENCES users(id));
+DO $$ DECLARE identity_constraint TEXT; BEGIN
+  SELECT c.conname INTO STRICT identity_constraint FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid='external_phone_identities'::regclass AND c.contype='u'
+      AND c.conkey=ARRAY[(SELECT attnum FROM pg_catalog.pg_attribute WHERE attrelid=c.conrelid AND attname='user_id')]::smallint[];
+  EXECUTE format('ALTER TABLE external_phone_identities DROP CONSTRAINT %I',identity_constraint);
+END $$;
+ALTER TABLE external_phone_identities ADD CONSTRAINT external_phone_identities_issuer_user_key UNIQUE(issuer,user_id);`
 };
 
 export class PostgresStore {
@@ -529,10 +548,16 @@ export class PostgresStore {
           if (paymentRows.rows.length) throw new Error('Precopied payment table must be empty before version-8 migration');
         } else if(next===10 && (names.has('user_feedback')||names.has('app_promotions'))) {
           const structure=await assertCopiedApplicationStructure(client,this.schema);
-          if(![10,11].includes(structure.copiedVersion)||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
+          if(![10,11,12].includes(structure.copiedVersion)||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
             throw new Error('Precopied community schema is not the complete version-10 application schema');
           const populated=await client.query('SELECT 1 AS present FROM user_feedback UNION ALL SELECT 1 AS present FROM app_promotions LIMIT 1');
           if(populated.rows.length)throw new Error('Precopied community tables must be empty before version-10 migration');
+        } else if(next===12&&names.has('phone_provider_settings')) {
+          const structure=await assertCopiedApplicationStructure(client,this.schema);
+          if(structure.copiedVersion!==12||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
+            throw new Error('Precopied phone provider schema is not the complete version-12 application schema');
+          const populated=await client.query('SELECT 1 AS present FROM phone_provider_settings LIMIT 1');
+          if(populated.rows.length)throw new Error('Precopied phone provider settings must be empty before version-12 migration');
         } else await client.query(MIGRATIONS[next]);
         if (next === 3) {
           const imports = await client.query('SELECT id,preview FROM imports');
@@ -559,7 +584,8 @@ export class PostgresStore {
   }
   async _verifyPointRepairStructure(client,names,expectedVersion=10){
     const structure=await assertCopiedApplicationStructure(client,this.schema);
-    if(structure.copiedVersion!==expectedVersion||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
+    const requiredVersion=names.has('phone_provider_settings')?12:expectedVersion;
+    if(structure.copiedVersion!==requiredVersion||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
       throw new Error('POINTS_PRECISION_SCHEMA_INVALID');
   }
   async _usingClient(fn, write = false) {

@@ -1,5 +1,14 @@
 # M2管理员、短信注册、会员、点数、模型与公告合同 v1
 
+## 2026-11-15 管理员短信通道切换
+
+- `GET /v1/admin/phone-provider`：仅当前有效管理员。返回 `{provider,revision,ready,updatedAt,providers:[{provider,displayName,configured}]}`，不返回云凭据、OTP或上游会话。
+- `PUT /v1/admin/phone-provider`：仅管理员，必须携带 `Idempotency-Key`；仅接受 `{provider,expectedRevision}`，provider为`supabase`或`aliyun_pnvs`。未配置422、版本冲突409，无权限401/403；在现有幂等事务内再次核验管理员身份并写审计。不会发送短信。
+- 配置选择按DEV／PROD分别保存；环境变量仅首次未保存时提供默认。新发码每次读取数据库，已部署后管理员切换无需改环境变量或重新部署。
+- 已发码按挑战记录的provider／issuer核验，固定凭据缺失或身份不符拒绝，不改用另一通道。原冷却／预算／用途／业务账号／一次性消费保持，云凭据不进入管理API。
+- schema12新增`phone_provider_settings`；`external_phone_identities`保留原行，并将唯一业务账号约束改为`UNIQUE(issuer,user_id)`，主键`(issuer,subject)`不变。已验证手机号换通道找回只为同一个业务账号添加绑定；同一issuer身份冲突、代建未验证及停用账号仍拒绝。
+
+
 ## 2026-11-14 管理员直接创建账号（源码及本地验证）
 
 `POST /v1/admin/users`，只允许当前有效管理员，必须携带 `Idempotency-Key`。请求为 `{phoneNumber,password,passwordConfirmation,displayName?,reason}`，手机号沿用大陆11位／+86规范，新密码沿用6–64字符及两次一致校验。返回200及现有管理员用户信息结构，不签发被创建用户的会话，不返回密码或哈希。

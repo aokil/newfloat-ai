@@ -9,7 +9,7 @@ export class Store {
     this.db = new DatabaseSync(filename);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
     const version = this.db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 11) {this.db.close();throw new Error('Database schema is newer than this server');}
+    if (version > 12) {this.db.close();throw new Error('Database schema is newer than this server');}
     if (version === 0) this.transaction(() => this.db.exec(`
       CREATE TABLE users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL,
         role TEXT NOT NULL CHECK(role IN ('user','admin')), disabled INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
@@ -140,6 +140,19 @@ export class Store {
       PRAGMA user_version=10;
     `));
     if(version<11){try{this.transaction(()=>migrateSqlitePointPrecision(this));}catch(error){this.db.close();throw error;}}
+    if(version<12)this.transaction(()=>this.db.exec(`
+      CREATE TABLE external_phone_identities_v12(issuer TEXT NOT NULL,subject TEXT NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id),phone TEXT NOT NULL,verified_at INTEGER NOT NULL,
+        PRIMARY KEY(issuer,subject),UNIQUE(issuer,user_id));
+      INSERT INTO external_phone_identities_v12(issuer,subject,user_id,phone,verified_at)
+        SELECT issuer,subject,user_id,phone,verified_at FROM external_phone_identities;
+      DROP TABLE external_phone_identities;
+      ALTER TABLE external_phone_identities_v12 RENAME TO external_phone_identities;
+      CREATE TABLE phone_provider_settings(environment TEXT PRIMARY KEY NOT NULL CHECK(environment IN ('DEV','PROD')),
+        provider TEXT NOT NULL CHECK(provider IN ('supabase','aliyun_pnvs')),revision INTEGER NOT NULL CHECK(revision>0),
+        updated_at INTEGER NOT NULL,updated_by TEXT NOT NULL REFERENCES users(id));
+      PRAGMA user_version=12;
+    `));
   }
   get(sql, ...params) { return this.db.prepare(sql).get(...params); }
   all(sql, ...params) { return this.db.prepare(sql).all(...params); }
