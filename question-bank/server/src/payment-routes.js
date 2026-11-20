@@ -62,6 +62,30 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
       expired:row.expires_at<=Date.now(),recoveryEligible:OPEN_STATUSES.has(row.status)&&row.qr_code===null&&row.expires_at>Date.now(),
       refundReviewRequired:row.error_code==='PAYMENT_REFUND_REVIEW_REQUIRED'};
   }
+  async function settleClose(orderId,receipt){
+    return await store.transaction(async()=>{
+      const row=await store.get('SELECT * FROM payment_orders WHERE id=?',orderId);
+      if(!row||receipt?.verified!==true||receipt.source!=='close'||receipt.closed!==true||receipt.orderId!==row.id||
+        receipt.environment!==row.environment||receipt.appId!==row.app_id||receipt.sellerId!==row.seller_id||
+        (receipt.tradeNo!==null&&(typeof receipt.tradeNo!=='string'||!/^[A-Za-z0-9_]{1,64}$/u.test(receipt.tradeNo))))
+        throw new AlipayFailure('PAYMENT_INVALID_RECEIPT');
+      // A callback may have settled the payment while the close request was in flight.
+      // Closing an unpaid trade is never a refund or a reason to reverse fulfilled rights.
+      if(row.status==='paid'||row.status==='closed')return row;
+      if(row.trade_no!==null&&receipt.tradeNo!==null&&row.trade_no!==receipt.tradeNo)throw new AlipayFailure('PAYMENT_INVALID_RECEIPT');
+      if(receipt.tradeNo!==null&&await store.get('SELECT id FROM payment_orders WHERE environment=? AND trade_no=? AND id<>?',row.environment,receipt.tradeNo,row.id))
+        throw new AlipayFailure('PAYMENT_INVALID_RECEIPT');
+      const ledger=await store.get('SELECT delta FROM points_ledger WHERE user_id=? AND idempotency_key=?',row.owner_id,`alipay:${row.id}`);
+      const membership=membershipPlan(row.package_id)?await members.orderReceipt(row.owner_id,row.id):null;
+      if(ledger||membership)throw new AlipayFailure('PAYMENT_LEDGER_INCONSISTENT');
+      const now=Date.now(),proof=sha256(JSON.stringify({source:'close',orderId:row.id,tradeNo:receipt.tradeNo,
+        environment:receipt.environment,appId:receipt.appId,sellerId:receipt.sellerId}));
+      await store.run("UPDATE payment_orders SET status='closed',qr_code=NULL,trade_no=COALESCE(?,trade_no),receipt_hash=?,checked_at=?,updated_at=?,error_code=NULL WHERE id=?",
+        receipt.tradeNo,proof,now,now,row.id);
+      await store.audit(row.owner_id,'payment-order-closed',row.id,{provider:'alipay',reason:'product-switch'});
+      return await store.get('SELECT * FROM payment_orders WHERE id=?',row.id);
+    });
+  }
   async function recover(row){
     const claimed=await store.transaction(async()=>{
       const fresh=await store.get('SELECT * FROM payment_orders WHERE id=?',row.id);
@@ -176,6 +200,27 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
       // deliver an authenticated order after the initiating session is revoked.
       req.auth=await authenticate(store,req);
       return await view(row);
+    });
+    routes.post('/v1/payments/orders/:id/close',{preHandler:auth,bodyLimit:1024,config:{rateLimit:{max:12,timeWindow:'1 minute'}}},async req=>{
+      fields(req.body,[]);
+      let row=await own(req),failure=null;
+      if(row.status!=='closed'&&row.status!=='paid'){
+        if(!validTransport(payment)||typeof payment.close!=='function')
+          throw new ApiError(503,'PAYMENT_CLOSE_NOT_AVAILABLE','订单关闭服务暂不可用，请稍后重试');
+        // Do not race an unfinished precreate/recovery and then mistake "not found" for a closed trade.
+        if((row.status==='creating'||row.qr_code===null)&&Date.now()-row.precreate_at<RECOVERY_INTERVAL)
+          throw new ApiError(409,'PAYMENT_CREATION_PENDING','原订单仍在创建，请稍后重试切换套餐');
+        try{row=await settleClose(row.id,await payment.close(row));}
+        catch(error){
+          failure=errorCode(error);
+          // A timeout, "already paid", or invalid close response is not proof of cancellation.
+          // Reconcile the original trade once, bypassing the normal display-query throttle.
+          try{row=await settle(row.id,await payment.query(row));}catch{row=await own(req);}
+        }
+      }
+      req.auth=await authenticate(store,req);row=await own(req);
+      const confirmed=row.status==='closed';
+      return {...await view(row,confirmed||row.status==='paid'?null:failure||'PAYMENT_CLOSE_UNCONFIRMED'),closeConfirmed:confirmed};
     });
     routes.get('/v1/payments/orders/:id',{preHandler:auth,config:{rateLimit:{max:30,timeWindow:'1 minute'}}},async req=>{
       let row=await own(req),failure=null;

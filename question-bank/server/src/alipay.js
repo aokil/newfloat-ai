@@ -43,6 +43,7 @@ function unavailable(reason){return Object.freeze({ready:false,unavailableReason
 function providerError(error){
   const code=error&&typeof error==='object'&&typeof error.code==='string'?error.code:'';
   if(code==='ACQ.TRADE_NOT_EXIST')return new AlipayFailure('PAYMENT_TRADE_NOT_FOUND');
+  if(code==='ACQ.TRADE_HAS_SUCCESS')return new AlipayFailure('PAYMENT_ALREADY_PAID');
   if(['ACQ.INVALID_PARAMETER','ACQ.ACCESS_FORBIDDEN','ACQ.INVALID_APP_ID','isv.app-not-exist','isv.insufficient-isv-permissions'].includes(code))
     return new AlipayFailure('PAYMENT_PROVIDER_REJECTED');
   if(code==='response-signature-verify-error'||code==='response-alipay-sn-verify-error')return new AlipayFailure('PAYMENT_INVALID_RECEIPT');
@@ -131,6 +132,14 @@ export function configuredAlipayTransport(env=process.env){
       // Query responses do not contain app_id/seller_id. The signed fixed SDK
       // context is checked against the immutable context that created this order.
       return receipt(data,order,'query');
+    },
+    async close(order){
+      sameContext(order);
+      const data=await call('/v3/alipay/trade/close',{out_trade_no:order.id});
+      if(data.out_trade_no!==order.id || (data.trade_no!=null && !TRADE_PATTERN.test(data.trade_no)))
+        throw new AlipayFailure('PAYMENT_INVALID_RECEIPT');
+      return {verified:true,orderId:order.id,tradeNo:data.trade_no??null,
+        environment,appId,sellerId,source:'close',closed:true};
     },
     verifyNotify(data,order){
       sameContext(order);
