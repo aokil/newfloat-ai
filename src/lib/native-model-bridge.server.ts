@@ -9,6 +9,7 @@ import { cozeModelFailureCode, cozeProjectModelCompletion, cozeProjectModelMetad
 import type { CozeModelExecutionContext, CozeModelMetadata, CozeSearchResult, CozeTestResult, CozeExtractionResult } from './coze-llm.server';
 import {cozeProjectAssistantCompletion} from './coze-assistant.server';
 import {cozeProjectMediaOperation} from './coze-media.server';
+import {cozeProjectImportRepair} from './coze-import-repair.server';
 import type {CozeAssistantEmit,CozeAssistantConfigure,CozeAssistantUsage} from '../../question-bank/server/src/coze-assistant-transport.js';
 
 type ModelConfiguration = { modelId: string; timeoutMs: number; maxOutputTokens: number };
@@ -22,6 +23,7 @@ export type NativeModelBridge = {
   assistant(model: unknown, request: unknown, signal: AbortSignal, onText?: CozeAssistantEmit,
     onReasoning?: CozeAssistantEmit, onConfiguration?: CozeAssistantConfigure, onUsage?: CozeAssistantUsage): Promise<Record<string,unknown>>;
   media(operation: unknown, input: unknown, signal: AbortSignal): Promise<Record<string,unknown>>;
+  importRepair(modelId: string, input: unknown, execution: {requestId:string;signal:AbortSignal;onSubmitted:()=>void}): Promise<Record<string,unknown>>;
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -119,6 +121,10 @@ export function nativeModelBridge(): NativeModelBridge {
   }
   return Object.freeze({
     get ready() { return cozeProjectModelsReady(); },
+    async importRepair(modelId: string,input: unknown,execution: {requestId:string;signal:AbortSignal;onSubmitted:()=>void}) {
+      try {return await cozeProjectImportRepair(modelId,input,execution);}
+      catch(error:unknown){throw await nativePublicFailure(error);}
+    },
     async media(operation: unknown, input: unknown, signal: AbortSignal) {
       try { return await cozeProjectMediaOperation(operation, input, signal); }
       catch (error: unknown) { throw await nativePublicFailure(error); }

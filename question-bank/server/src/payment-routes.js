@@ -3,6 +3,8 @@ import {ApiError,authenticate,fields,sha256,text} from './security.js';
 import {points} from './account.js';
 import {availablePoints} from './point-values.js';
 import {POINTS_PACKAGES,AlipayFailure,amountString} from './alipay.js';
+import {membershipAccount,membershipPlan,MEMBERSHIP_PLANS} from './membership.js';
+import {pointWallet} from './point-wallet.js';
 
 const NOTIFY_PATH='/v1/payments/alipay/notify';
 const NOTIFY_LIMIT=16*1024;
@@ -38,17 +40,21 @@ function receiptMatches(order,receipt){
 
 /** Register on the existing authenticated backend; positive points are not required. */
 export async function registerPaymentRoutes(app,{store,auth,payment=null}){
+  const members=membershipAccount(store);
   async function own(req){
     if(typeof req.params.id!=='string'||!/^pay_[a-f0-9]{32}$/u.test(req.params.id))absent();
     const row=await store.get('SELECT * FROM payment_orders WHERE id=? AND owner_id=?',req.params.id,req.auth.user_id);
     if(!row)absent();return row;
   }
   async function view(row,checkError=null){
-    const user=await store.get('SELECT points_balance,points_reserved FROM users WHERE id=?',row.owner_id);
+    await members.snapshot(row.owner_id);
+    const user=await pointWallet(store).user(row.owner_id),plan=membershipPlan(row.package_id);
+    const membership=plan?await members.orderReceipt(row.owner_id,row.id):null;
     if(!user)absent();
     return {orderId:row.id,status:row.status,packageId:row.package_id,title:row.package_title,
       amountMinor:row.amount_minor,priceCents:row.amount_minor,amount:amountString(row.amount_minor),currency:'CNY',points:row.points,
-      credited:row.status==='paid',pointsCredited:row.status==='paid'?row.points:0,pointsBalance:user.points_balance,
+      productType:plan?'membership':'points',fulfilled:row.status==='paid'&&(!plan||membership?.fulfilled===true),membership,
+      credited:row.status==='paid',pointsCredited:row.status==='paid'&&(!plan||Date.parse(membership?.startsAt)<=row.paid_at)?row.points:0,pointsBalance:user.points_balance,
       pointsAvailable:availablePoints(user),
       qrCode:row.status==='pending'&&row.expires_at>Date.now()?row.qr_code:null,
       expiresAt:new Date(row.expires_at).toISOString(),paidAt:row.paid_at===null?null:new Date(row.paid_at).toISOString(),
@@ -89,8 +95,9 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
       if(reused)throw new AlipayFailure('PAYMENT_INVALID_RECEIPT');
       const key=`alipay:${row.id}`;
       const ledger=await store.get('SELECT delta FROM points_ledger WHERE user_id=? AND idempotency_key=?',row.owner_id,key);
+      const plan=membershipPlan(row.package_id),membership=plan?await members.orderReceipt(row.owner_id,row.id):null;
       if(row.status==='paid'){
-        if(!ledger||ledger.delta!==row.points)throw new AlipayFailure('PAYMENT_LEDGER_INCONSISTENT');
+        if(plan?(!membership?.fulfilled||membership.plan!==plan.plan):(!ledger||ledger.delta!==row.points))throw new AlipayFailure('PAYMENT_LEDGER_INCONSISTENT');
         if(receipt.status==='TRADE_CLOSED'&&row.error_code!=='PAYMENT_REFUND_REVIEW_REQUIRED'){
           // Refund accounting is a separate explicit workflow. Never silently
           // remove points from a user based on a close notification.
@@ -99,13 +106,14 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
         }
         return await store.get('SELECT * FROM payment_orders WHERE id=?',row.id);
       }
-      if(ledger)throw new AlipayFailure('PAYMENT_LEDGER_INCONSISTENT');
+      if(ledger||membership)throw new AlipayFailure('PAYMENT_LEDGER_INCONSISTENT');
       const now=Date.now(),proof=sha256(JSON.stringify({source:receipt.source,tradeNo:receipt.tradeNo,status:receipt.status,
         amountMinor:receipt.amountMinor,appId:receipt.appId,sellerId:receipt.sellerId,environment:receipt.environment}));
       if(receipt.paid){
         const user=await store.get('SELECT * FROM users WHERE id=?',row.owner_id);
         if(!user)throw new AlipayFailure('PAYMENT_OWNER_NOT_FOUND');
-        await points(store,user,row.points,null,'支付宝套餐购买',key);
+        if(plan)await members.fulfill(row.owner_id,row.id,plan.id);
+        else await points(store,user,row.points,null,'支付宝套餐购买',key);
         await store.run("UPDATE payment_orders SET status='paid',trade_no=?,receipt_hash=?,paid_at=?,checked_at=?,updated_at=?,error_code=NULL WHERE id=?",receipt.tradeNo,proof,now,now,now,row.id);
         await store.audit(null,'payment-credited',row.id,{provider:'alipay',points:row.points,amountMinor:row.amount_minor});
       }else if(receipt.status==='TRADE_CLOSED'){
@@ -131,7 +139,7 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
         amount:amountString(item.amountMinor),bonusPercent:Math.round((item.points*990/(item.amountMinor*100)-1)*100000)/1000}))}));
     routes.post('/v1/payments/orders',{preHandler:auth,bodyLimit:1024,config:{rateLimit:{max:6,timeWindow:'1 minute'}}},async req=>{
       fields(req.body,['packageId']);const packageId=text(req.body.packageId,'套餐',1,64);
-      const chosen=POINTS_PACKAGES.find(item=>item.id===packageId);
+      const chosen=[...POINTS_PACKAGES,...MEMBERSHIP_PLANS].find(item=>item.id===packageId);
       if(!chosen)throw new ApiError(400,'PAYMENT_PACKAGE_NOT_FOUND','套餐不存在');
       const idempotencyHash=sha256(text(req.headers['idempotency-key'],'Idempotency-Key',1,128)),requestHash=sha256(JSON.stringify({packageId}));
       const begin=await store.transaction(async()=>{
@@ -146,6 +154,7 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
         const now=Date.now(),orderId=`pay_${randomBytes(16).toString('hex')}`;
         await store.run('INSERT INTO payment_orders(id,owner_id,idempotency_hash,request_hash,environment,app_id,seller_id,package_id,package_title,amount_minor,points,status,created_at,updated_at,expires_at,precreate_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
           orderId,req.auth.user_id,idempotencyHash,requestHash,payment.environment,payment.appId,payment.sellerId,chosen.id,chosen.title,chosen.amountMinor,chosen.points,'creating',now,now,now+900000,now);
+        if(membershipPlan(chosen.id))await members.freezeOffer(req.auth.user_id,orderId,chosen);
         await store.audit(req.auth.user_id,'payment-order-created',orderId,{provider:'alipay',packageId:chosen.id});
         return {row:await store.get('SELECT * FROM payment_orders WHERE id=?',orderId),replay:false};
       });

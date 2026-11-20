@@ -9,10 +9,13 @@ import { parseFile } from './parser.js';
 import { inspectQuestion, TYPES } from './questions.js';
 import { SmsService } from './sms.js';
 import { ExternalPhoneService } from './external-phone.js';
-import { accountInfo, points, requirePositivePoints } from './account.js';
+import { accountInfo, points, requirePositivePoints, requireImportAccess } from './account.js';
 import { adminRoutes } from './admin-routes.js';
 import { registerAppUpdateRoutes } from './app-updates.js';
 import { aiRoutes } from './ai-routes.js';
+import { importRepairRoutes } from './import-repair-routes.js';
+import {membershipRoutes} from './membership.js';
+import {lockCloudLibraryOwner,requireCloudLibraryCapacity} from './library-capacity.js';
 import { assistantRoutes } from './assistant-routes.js';
 import { assistantMediaRoutes } from './assistant-media-routes.js';
 import { assistantErrorDiagnostic, assistantBackendDiagnostic } from './assistant-provider-errors.js';
@@ -389,10 +392,11 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
             reply.code(202);
             return old;
         }
-        await requirePositivePoints(store, req.auth.user_id);
+        const importAccess=await requireImportAccess(store, req.auth.user_id);
         let parsed, status = 'ready';
         try {
             parsed = await parseFile(filename, bytes);
+            if(parsed.items.length>importAccess.membership.importLimit)throw new ApiError(422,'IMPORT_QUESTION_LIMIT',`本次导入最多${importAccess.membership.importLimit}题，请拆分文件`);
             if (parsed.items.some(q => q.errors.length) || !parsed.items.length)
                 status = 'needs_review';
         }
@@ -411,7 +415,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
             return replay;
         }
         const result = await idem(req, digest, async () => {
-            await requirePositivePoints(store, req.auth.user_id);
+            await requireImportAccess(store, req.auth.user_id);
             const importId = id('i'), now = Date.now();
             await store.run('INSERT INTO imports(id,owner_id,filename,format,file_sha,preview,created_at,expires_at,title,revision,status,source,warnings,summary) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', importId, req.auth.user_id, filename, parsed.format, fileSha, JSON.stringify(parsed.items), now, now + 30 * 86400000, title, 1, status, bytes, JSON.stringify(parsed.warnings), JSON.stringify(importSummary(parsed.items)));
             await store.audit(req.auth.user_id, 'upload', importId, { format: parsed.format, size: bytes.length });
@@ -440,7 +444,6 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         fields(req.body, ['expectedRevision', 'question']);
         return await store.transaction(async () => {
         req.auth = await authenticate(store, req);
-        await requirePositivePoints(store, req.auth.user_id);
         const row = await ownImport(req);
         if (row.status === 'confirmed')
             conflict('已确认任务不可编辑，请重新导入并显式选择目标库版本');
@@ -467,6 +470,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         const row = await ownImport(req);
         const digest = sha256(JSON.stringify({ importId: row.id, ...req.body }));
         return await idem(req, digest, async () => {
+            await lockCloudLibraryOwner(store,req.auth.user_id);
             const row = await ownImport(req);
             if (req.body.expectedRevision !== row.revision)
                 conflict('预览版本已变化，请重新核对');
@@ -484,7 +488,6 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
                 }
                 return { bankId: b.id, dataVersion: v.data_version, visibility: 'private', questionCount: v.question_count };
             }
-            await requirePositivePoints(store, req.auth.user_id);
             if (['failed', 'processing'].includes(row.status))
                 throw new ApiError(422, 'VALIDATION_FAILED', '解析尚未成功完成，不能确认');
             const preview = JSON.parse(row.preview);
@@ -514,6 +517,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
                 conflict('目标题库版本已变化');
             if (!req.body.bankId && old && old.current_version !== row.committed_version)
                 conflict('源题库版本已变化，请显式选择目标版本');
+            await requireCloudLibraryCapacity(store,req.auth.user_id,old?.id??null,questions.length);
             const payload = JSON.stringify({ schemaVersion: 2, normalizationVersion: 'text-v1', bankId, title, description: old?.description || '', visibility: 'private', ownerUserId: req.auth.user_id, dataVersion, releaseSequence: sequence,
                 questions: questions.map(({ question }) => ({ ...question, bankId, dataVersion })) });
             if (Buffer.byteLength(payload) > 32 * 1024 * 1024)
@@ -604,6 +608,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         const description = text(req.body.description, 'description', 0, 1000);
         const digest = sha256(JSON.stringify({ bankId: req.params.id, expected, title, description }));
         return await idem(req, digest, async () => {
+            await lockCloudLibraryOwner(store,req.auth.user_id);
             const bank = await store.get('SELECT * FROM banks WHERE id=? AND owner_id=? AND deleted_at IS NULL', req.params.id, req.auth.user_id);
             if (!bank)
                 missing();
@@ -630,8 +635,9 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         fields(req.body, ['expectedBankVersion', 'question']);
         const expected = text(req.body.expectedBankVersion, 'expectedBankVersion'), digest = sha256(JSON.stringify({ bankId: req.params.id, questionId: req.params.questionId ?? null, create, expected, question: req.body.question }));
         return await idem(req, digest, async () => {
+            await lockCloudLibraryOwner(store,req.auth.user_id);
             if (create)
-                await requirePositivePoints(store, req.auth.user_id);
+                await requireImportAccess(store, req.auth.user_id);
             const bank = await store.get('SELECT * FROM banks WHERE id=? AND owner_id=? AND deleted_at IS NULL', req.params.id, req.auth.user_id);
             if (!bank)
                 missing();
@@ -658,6 +664,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
             for (let i = 0; i < questions.length; i++)
                 if (i !== index)
                     questions[i] = { ...questions[i], bankId: bank.id, dataVersion };
+            await requireCloudLibraryCapacity(store,req.auth.user_id,bank.id,questions.length);
             const payload = JSON.stringify({ ...oldPayload, bankId: bank.id, title: bank.title, visibility: 'private', ownerUserId: req.auth.user_id, dataVersion, releaseSequence: sequence, questions });
             const size = Buffer.byteLength(payload);
             if (size > 32 * 1024 * 1024)
@@ -676,6 +683,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         const expected = text(req.body.expectedBankVersion, 'expectedBankVersion');
         const digest = sha256(JSON.stringify({ bankId: req.params.id, expected }));
         return await idem(req, digest, async () => {
+            await lockCloudLibraryOwner(store,req.auth.user_id);
             const bank = await store.get('SELECT * FROM banks WHERE id=? AND owner_id=? AND deleted_at IS NULL', req.params.id, req.auth.user_id);
             if (!bank)
                 missing();
@@ -779,6 +787,8 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
     adminRoutes(app, { store, auth, admin, idem, integer, modelMasterKey, baichuanApiKey, deepseekApiKey, modelTransport, cozeBridge });
     communityRoutes(app,{store,auth,admin,idem,integer});
     await aiRoutes(app, { store, auth, modelMasterKey, baichuanApiKey, deepseekApiKey, aiTransport, cozeBridge, rateLimits });
+    await importRepairRoutes(app, {store,auth,cozeBridge});
+    await membershipRoutes(app,{store,auth});
     await assistantRoutes(app, { store, auth, modelMasterKey, baichuanApiKey, deepseekApiKey, rateLimits, cozeBridge });
     await assistantMediaRoutes(app, {store,auth,cozeBridge});
     await registerPaymentRoutes(app, { store, auth, payment: paymentTransport });

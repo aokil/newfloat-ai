@@ -1,5 +1,5 @@
 import {ApiError,sha256} from './security.js';
-import {points} from './account.js';
+import {pointWallet} from './point-wallet.js';
 import {pointUnits,pointValue,availablePointUnits,availablePoints} from './point-values.js';
 import {assistantTokenUsage,assistantTokenCost,assistantTokenPricing,ASSISTANT_NANOS_PER_CENTIPOINT} from './assistant-token-prices.js';
 import {assistantFinancialAccount,TOKEN_FINANCIAL_PREFIX as PREFIX,MEDIA_FINANCIAL_PREFIX,ASSISTANT_FINANCIAL_ACCOUNT as ACCOUNT} from './assistant-financial-account.js';
@@ -18,37 +18,36 @@ const receipt=(row,user)=>({version:1,mode:'token',state:row.state,requestId:row
 /** All durable data are financial counters, hashes and snapshots; never prompts, replies or credentials. */
 export function assistantTokenBilling(store){
   const {read,account,write,getUser}=assistantFinancialAccount(store);
+  const wallet=pointWallet(store);
   const mediaBilling=assistantMediaBilling(store);
   const finish=async(owner,key,{expired=false}={})=>store.transaction(async()=>{
+    let user=await getUser(owner);
     const found=await read(owner,key);if(!found)throw new ApiError(500,'ASSISTANT_BILLING_RECORD_INVALID','对话计费记录缺失');
-    let row=found.value,user=await getUser(owner);
+    let row=found.value;
     if(!['pending','settlement_pending'].includes(row.state))return receipt(row,user);
     if(expired&&row.state==='pending'&&row.expiresAt>Date.now())return null;
     const state=await account(owner),reserved=row.reservedUnits??0;
-    if(reserved){
-      if(pointUnits(user.points_reserved)<reserved)throw new ApiError(500,'ASSISTANT_BILLING_RESERVATION_INVALID','计费预留记录不一致，未重复扣点');
-      await store.run('UPDATE users SET points_reserved=ROUND(points_reserved-?,2),revision=revision+1 WHERE id=?',pointValue(reserved),owner);
-      row.reservedUnits=0;user=await getUser(owner);
-    }
+    await wallet.reserve(owner,key,reserved,found.row.request_hash);
     let cost;
     if(row.usage&&!row.usageUnconfirmed){
       try{cost=assistantTokenCost(row.price,row.usage);}catch{row.usageUnconfirmed=true;}
     }
     if(!cost){
-      row={...row,state:'usage_unconfirmed',chargedUnits:0,carryNanos:state.carryNanos,finishedAt:Date.now()};
+      await wallet.release(owner,key);user=await getUser(owner);
+      row={...row,state:'usage_unconfirmed',reservedUnits:0,chargedUnits:0,carryNanos:state.carryNanos,finishedAt:Date.now()};
     }else{
       const total=BigInt(state.carryNanos)+cost.nanos;
       const units=Number(total/ASSISTANT_NANOS_PER_CENTIPOINT);
       row={...row,feeNanos:String(cost.nanos),rates:cost.rates};
-      if(units>availablePointUnits(user)){
+      const result=await wallet.capture(owner,key,units,{reason:'对话Token · '+row.price.modelId,ledgerKey:key});
+      if(!result.settled){
         // Never make a balance negative. This only covers an upstream budget/counter discrepancy.
         row={...row,state:'settlement_pending',chargedUnits:0,carryNanos:state.carryNanos,requiredUnits:units};
         await write(owner,key,row);
         return receipt(row,user);
       }
-      if(units)await points(store,user,-pointValue(units),owner,'对话Token · '+row.price.modelId,key);
       state.carryNanos=String(total%ASSISTANT_NANOS_PER_CENTIPOINT);
-      row={...row,state:'settled',chargedUnits:units,requiredUnits:0,carryNanos:state.carryNanos,finishedAt:Date.now()};
+      row={...row,state:'settled',reservedUnits:0,chargedUnits:units,requiredUnits:0,carryNanos:state.carryNanos,finishedAt:Date.now()};
       user=await getUser(owner);
     }
     state.pending=state.pending.filter(item=>item!==key);
@@ -72,6 +71,7 @@ export function assistantTokenBilling(store){
     await recover(owner);
     const key=PREFIX+sha256(requestId);
     await store.transaction(async()=>{
+      const user=await getUser(owner);
       const prior=await read(owner,key);
       if(prior){
         if(prior.row.request_hash!==digest)throw new ApiError(409,'ASSISTANT_IDEMPOTENCY_CONFLICT','同一请求编号不能用于不同对话或模型');
@@ -79,7 +79,7 @@ export function assistantTokenBilling(store){
           prior.value.state==='pending'?'原请求仍在处理，未再次调用或扣点':'原请求已有计费记录，未再次调用模型；请查看原任务或重新发送消息',
           {billing:receipt(prior.value,await getUser(owner))});
       }
-      const user=await getUser(owner),state=await account(owner);
+      const state=await account(owner);
       const requiredUnits=Number((BigInt(quote.amountNanos)+BigInt(state.carryNanos)+ASSISTANT_NANOS_PER_CENTIPOINT-1n)/ASSISTANT_NANOS_PER_CENTIPOINT);
       if(user.disabled)throw new ApiError(403,'ACCOUNT_DISABLED','账号不可用');
       for(const pendingKey of state.pending){
@@ -97,7 +97,7 @@ export function assistantTokenBilling(store){
           outputTokenBudget:quote.outputTokenBudget,estimated:true});
       const row={type:'assistant_token_v1',requestId,state:'pending',price,quote,reservedUnits:requiredUnits,
         chargedUnits:0,usage:null,startedAt:Date.now(),expiresAt:Date.now()+timeoutSeconds*1000+30000};
-      await store.run('UPDATE users SET points_reserved=ROUND(points_reserved+?,2),revision=revision+1 WHERE id=?',pointValue(requiredUnits),owner);
+      await wallet.reserve(owner,key,requiredUnits,digest);
       await store.run('INSERT INTO confirmations(owner_id,idempotency_key,request_hash,result) VALUES(?,?,?,?)',owner,key,digest,JSON.stringify(row));
       state.pending.push(key);await write(owner,ACCOUNT,state);
     });

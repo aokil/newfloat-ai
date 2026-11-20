@@ -1,5 +1,7 @@
 import {ApiError,sha256} from './security.js';
 import {ASSISTANT_NANOS_PER_CENTIPOINT} from './assistant-token-prices.js';
+import {pointWallet} from './point-wallet.js';
+import {membershipAccount} from './membership.js';
 
 // Preserve the existing language account/keyspace: media and language share one
 // sub-centipoint carry and the same users.points_reserved balance.
@@ -36,7 +38,8 @@ export function assistantFinancialAccount(store){
   };
   const write=async(owner,key,value)=>store.run('UPDATE confirmations SET result=? WHERE owner_id=? AND idempotency_key=?',JSON.stringify(value),owner,key);
   const getUser=async owner=>{
-    const user=await store.get('SELECT * FROM users WHERE id=?',owner);
+    await membershipAccount(store).snapshot(owner);
+    const user=await pointWallet(store).user(owner);
     if(!user)throw new ApiError(403,'ACCOUNT_DISABLED','账号不可用');
     return user;
   };

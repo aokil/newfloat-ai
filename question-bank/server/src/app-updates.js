@@ -8,7 +8,8 @@ import {ApiError} from './security.js';
 
 export const APP_PACKAGE='com.newfloat.floating';
 export const PART_SIZE=4*1024*1024;
-export const APK_LIMIT=96*1024*1024;
+export const APK_LIMIT=256*1024*1024;
+export const MAX_APK_PARTS=Math.ceil(APK_LIMIT/PART_SIZE);
 const MANIFEST_LIMIT=32*1024;
 const HASH=/^[0-9a-f]{64}$/u;
 const execFileAsync=promisify(execFile);
@@ -35,7 +36,7 @@ function validateManifest(value,releaseId) {
   if(!Number.isSafeInteger(value.minSdk)||value.minSdk<=0||!Number.isSafeInteger(value.sizeBytes)||value.sizeBytes<1||value.sizeBytes>APK_LIMIT)manifestError();
   let publishedAt;try{publishedAt=typeof value.publishedAt==='string'?new Date(value.publishedAt).toISOString():null;}catch{manifestError();}
   if(typeof value.notes!=='string'||value.notes.length>2000||publishedAt!==value.publishedAt)manifestError();
-  if(!Array.isArray(value.parts)||!value.parts.length||value.parts.length>24||value.parts.length!==Math.ceil(value.sizeBytes/PART_SIZE))manifestError();
+  if(!Array.isArray(value.parts)||!value.parts.length||value.parts.length>MAX_APK_PARTS||value.parts.length!==Math.ceil(value.sizeBytes/PART_SIZE))manifestError();
   let total=0;
   for(let index=0;index<value.parts.length;index++){
     const part=value.parts[index],expected=index===value.parts.length-1?value.sizeBytes-index*PART_SIZE:PART_SIZE;
@@ -90,7 +91,7 @@ export function registerAppUpdateRoutes(app,{directory=null}={}) {
   app.get('/v1/app-updates/android/packages/:releaseId/parts/:index',async(req,reply)=>{
     if(!directory)notFound();
     const {releaseId,index:raw}=req.params;if(!HASH.test(releaseId)||!/^(0|[1-9]\d*)$/u.test(raw))notFound();
-    const index=Number(raw);if(!Number.isSafeInteger(index)||index<0||index>=24)notFound();
+    const index=Number(raw);if(!Number.isSafeInteger(index)||index<0||index>=MAX_APK_PARTS)notFound();
     const {manifest,apkPath}=await loadRelease(directory??'',releaseId),part=manifest.parts[index];if(!part)notFound();
     const start=index*PART_SIZE,end=start+part.sizeBytes-1,bytes=await new Promise((resolvePart,reject)=>{
       const chunks=[];let size=0;const stream=createReadStream(apkPath,{start,end});
@@ -141,7 +142,7 @@ export async function prepareAppUpdate({directory,apkPath,notes='',inspect=inspe
   if(typeof directory!=='string'||!directory||typeof apkPath!=='string'||!apkPath)throw new Error('prepare需要directory和apkPath');
   if(typeof notes!=='string'||notes.length>2000)throw new Error('notes最多2000字符');
   const source=await realpath(resolve(apkPath)),sourceInfo=await lstat(source);if(!sourceInfo.isFile()||sourceInfo.isSymbolicLink())throw new Error('APK必须是可信本地普通文件');
-  if(sourceInfo.size<1||sourceInfo.size>APK_LIMIT)throw new Error('APK大小须为1..96MiB');
+  if(sourceInfo.size<1||sourceInfo.size>APK_LIMIT)throw new Error('APK大小须为1..256MiB');
   const root=resolve(directory);await mkdir(join(root,'releases'),{recursive:true});
   const releaseId=await hashFile(source),releaseDirectory=join(root,'releases',releaseId);
   try{await lstat(releaseDirectory);throw new Error('相同APK发布目录已存在，拒绝覆盖');}catch(error){if(error.code!=='ENOENT')throw error;}

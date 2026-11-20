@@ -1,0 +1,1 @@
+export function cozeGatewayImportRepair(context:{baseUrl:string;key:string;headers:HeadersInit},modelId:string,input:unknown,execution:{signal:AbortSignal;onSubmitted:()=>void}):Promise<Record<string,unknown>>;

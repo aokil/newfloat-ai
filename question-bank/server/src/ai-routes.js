@@ -1,5 +1,7 @@
 import {ApiError,authenticate,fields,id,sha256,text} from './security.js';
-import {points,requirePositivePoints} from './account.js';
+import {requirePositivePoints} from './account.js';
+import {pointWallet} from './point-wallet.js';
+import {membershipAccount} from './membership.js';
 import {BYOK_PROVIDERS,MODEL_PROVIDERS,byokConfiguration,officialModelSearch,officialModelExtract,modelSecret} from './models.js';
 import {validateExtractedQuestion,isDoubaoMiniModelId} from './ocr-extraction.js';
 import {availablePoints,pointUnits,precisePointsRequest} from './point-values.js';
@@ -39,7 +41,7 @@ function providerError(error){
 async function releaseFailed(store,row,error){
   const fresh=await store.get('SELECT * FROM ai_requests WHERE id=?',row.id);
   if(fresh?.status!=='pending')return;
-  if(fresh.points_cost>0)await store.run('UPDATE users SET points_reserved=ROUND(points_reserved-?,2),revision=revision+1 WHERE id=?',fresh.points_cost,fresh.user_id);
+  if(fresh.points_cost>0)await pointWallet(store).release(fresh.user_id,'ai-search:'+fresh.id);
   await store.run("UPDATE ai_requests SET status='failed',error_code=?,error_message=?,http_status=?,updated_at=? WHERE id=?",error.code,error.message,error.statusCode,Date.now(),fresh.id);
   await store.audit(fresh.user_id,'ai-search-failed',fresh.id,{errorCode:error.code,pointsCharged:0});
 }
@@ -56,7 +58,7 @@ async function previousResult(store,row,digest){
   if(row.request_hash!==digest)throw new ApiError(409,'IDEMPOTENCY_CONFLICT','本次请求标识已用于其他问题、模型或Key');
   if(row.status==='pending')throw new ApiError(409,'AI_REQUEST_PENDING','模型仍在处理中，请使用同一请求标识稍后查询');
   if(row.status==='failed')throw new ApiError(row.http_status||502,row.error_code||'PROVIDER_FAILED',row.error_message||'此前请求失败，本次未再次调用模型');
-  const user=await store.get('SELECT points_balance,points_reserved FROM users WHERE id=?',row.user_id);
+  const user=await pointWallet(store).user(row.user_id);
   return {...JSON.parse(row.result),pointsAvailable:availablePoints(user)};
 }
 function validateReceipt(result,question){
@@ -75,7 +77,8 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,baichuanApiKey=nul
   recovery.unref();app.addHook('onClose',async()=>{clearInterval(recovery);if(recoveryTask)await recoveryTask;});
 
   app.get('/v1/models/catalog',{preHandler:auth},async req=>{
-    const user=await store.get('SELECT * FROM users WHERE id=?',req.auth.user_id),available=availablePoints(user),bindings=await configuredCatalog(store);
+    await membershipAccount(store).snapshot(req.auth.user_id);
+    const user=await pointWallet(store).user(req.auth.user_id),available=availablePoints(user),bindings=await configuredCatalog(store);
     let imageModels=null;
     if(cozeBridge?.ready&&[...bindings.values()].some(binding=>binding?.config.execution==='coze')){
       try{imageModels=(await cozeBridge.metadata()).items;}catch{}
@@ -165,7 +168,7 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,baichuanApiKey=nul
           model={key:`byok-${config.provider}`,name:config.modelId,provider:config.provider,mode};
         }
         const requestId=id('ai');
-        if(cost>0)await store.run('UPDATE users SET points_reserved=ROUND(points_reserved+?,2),revision=revision+1 WHERE id=?',cost,user.id);
+        if(cost>0)await pointWallet(store).reserve(user.id,'ai-search:'+requestId,pointUnits(cost),digest);
         await store.run("INSERT INTO ai_requests(id,user_id,session_id,idempotency_hash,request_hash,mode,model_id,model_revision,catalog_key,points_cost,status,created_at,updated_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)",
           requestId,user.id,req.auth.id,keyHash,digest,mode,row?.id??null,row?.revision??null,product?.key??null,cost,now,now,now+config.timeoutMs+15000);
         return {request:await store.get('SELECT * FROM ai_requests WHERE id=?',requestId)};
@@ -192,9 +195,9 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,baichuanApiKey=nul
           if(!current||current.row.id!==row.model_id||current.row.revision!==row.model_revision||modelUnavailableReason(product,current))throw new ApiError(409,'MODEL_CHANGED','模型配置已变化，本次未扣平台点数');
         }else await requirePositivePoints(store,row.user_id);
         if(row.points_cost>0){
-          await store.run('UPDATE users SET points_reserved=ROUND(points_reserved-?,2),revision=revision+1 WHERE id=?',row.points_cost,row.user_id);
-          user=await store.get('SELECT * FROM users WHERE id=?',row.user_id);
-          await points(store,user,-row.points_cost,row.user_id,`${extraction?'AI提取题目':'AI搜题'}：${model.name}`,`ai-search:${row.id}`);
+          const settled=await pointWallet(store).capture(row.user_id,'ai-search:'+row.id,pointUnits(row.points_cost),
+            {reason:`${extraction?'AI提取题目':'AI搜题'}：${model.name}`,ledgerKey:`ai-search:${row.id}`});
+          if(!settled.settled)throw new ApiError(500,'AI_BILLING_RESERVATION_INVALID','原请求预算无法核实，本次未重复扣点');
         }
         user=await store.get('SELECT * FROM users WHERE id=?',row.user_id);
         const result={requestId:row.id,status:'completed',source:extraction?'ai-ocr':'ai',...(extraction?{purpose:'ocr-extraction-v1'}:{}),model,...receipt,pointsCharged:row.points_cost,pointsAvailable:availablePoints(user),

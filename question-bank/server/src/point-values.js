@@ -18,7 +18,7 @@ export function availablePointUnits(user){return pointUnits(user.points_balance)
 export function availablePoints(user){return pointValue(availablePointUnits(user));}
 export function isPointAmount(value,{positive=false}={}){try{const units=pointUnits(value);return positive?units>0:units>=0;}catch{return false;}}
 export const precisePointsRequest=req=>req?.headers?.['x-float-points-precision']==='2';
-const fields=new Set(['pointsBalance','pointsReserved','pointsAvailable','pointsCharged','pointsPerCall','pointsCredited','balanceBefore','balanceAfter','delta','points','basicPointsPerUse','byokPointsPerCall']);
+const fields=new Set(['pointsBalance','pointsReserved','pointsAvailable','pointsCharged','pointsPerCall','pointsCredited','balanceBefore','balanceAfter','delta','points','basicPointsPerUse','byokPointsPerCall','permanentAvailable','monthlyAvailable','monthlyReserved','expiredReserved']);
 export function pointsResponse(value,precise){
   if(Array.isArray(value))return value.map(item=>pointsResponse(item,precise));
   if(value===null||typeof value!=='object'||![Object.prototype,null].includes(Object.getPrototypeOf(value)))return value;

@@ -1,5 +1,5 @@
 import {ApiError,sha256} from './security.js';
-import {points} from './account.js';
+import {pointWallet} from './point-wallet.js';
 import {pointUnits,pointValue,availablePointUnits,availablePoints} from './point-values.js';
 import {ASSISTANT_NANOS_PER_CENTIPOINT as CENTIPOINT} from './assistant-token-prices.js';
 import {assistantFinancialAccount,MEDIA_FINANCIAL_PREFIX as PREFIX,ASSISTANT_FINANCIAL_ACCOUNT as ACCOUNT} from './assistant-financial-account.js';
@@ -19,6 +19,7 @@ const receipt=(row,user)=>({version:1,mode:'media',jobId:row.jobId,state:row.sta
 /** Separate async financial lifecycle. Paid evidence survives deleting a conversation/job. */
 export function assistantMediaBilling(store){
   const {read,account,write,getUser}=assistantFinancialAccount(store);
+  const wallet=pointWallet(store);
   const find=async(owner,id)=>{
     const found=await read(owner,keyFor(id));
     if(found&&found.value.type!=='assistant_media_billing_v1')throw new ApiError(500,'MEDIA_BILLING_RECORD_INVALID','媒体账单类型无法核实');
@@ -26,8 +27,9 @@ export function assistantMediaBilling(store){
   };
   const settleKey=async(owner,key)=>store.transaction(async()=>{
     if(!key.startsWith(PREFIX))throw new ApiError(400,'MEDIA_BILLING_RECORD_INVALID','媒体账单编号无效');
+    let user=await getUser(owner);
     const found=await read(owner,key);if(!found)return null;
-    let row=found.value,user=await getUser(owner);
+    let row=found.value;
     if(row.type!=='assistant_media_billing_v1')throw new ApiError(500,'MEDIA_BILLING_RECORD_INVALID','媒体账单类型无法核实');
     if(['settled','cancelled'].includes(row.state))return receipt(row,user);
     if(row.feeNanos===undefined||row.usageConflict||!row.providerTerminal)return receipt(row,user);
@@ -35,18 +37,13 @@ export function assistantMediaBilling(store){
     const state=await account(owner),total=BigInt(state.carryNanos)+BigInt(row.feeNanos),rawUnits=total/CENTIPOINT;
     if(rawUnits>100_000_000_000n)throw new ApiError(500,'MEDIA_BILLING_RECORD_INVALID','实际媒体费用超出账本范围，待人工核账');
     const units=Number(rawUnits),reserved=row.reservedUnits??0;
-    if(pointUnits(user.points_reserved)<reserved)throw new ApiError(500,'MEDIA_BILLING_RESERVATION_INVALID','媒体预留记录不一致，未重复扣点');
-    const spendable=availablePointUnits(user)+reserved;
-    if(units>spendable){
+    await wallet.reserve(owner,key,reserved,found.row.request_hash);
+    const result=await wallet.capture(owner,key,units,{reason:'媒体生成 · '+row.price.modelId,ledgerKey:key});
+    if(!result.settled){
       // Preserve the existing hold, do not overdraw or call another paid model.
-      row={...row,state:'settlement_pending',requiredUnits:units-spendable};
+      row={...row,state:'settlement_pending',requiredUnits:result.requiredUnits};
       await write(owner,key,row);return receipt(row,user);
     }
-    if(reserved){
-      await store.run('UPDATE users SET points_reserved=ROUND(points_reserved-?,2),revision=revision+1 WHERE id=?',pointValue(reserved),owner);
-      user=await getUser(owner);
-    }
-    if(units)await points(store,user,-pointValue(units),owner,'媒体生成 · '+row.price.modelId,key);
     state.carryNanos=String(total%CENTIPOINT);state.pending=state.pending.filter(item=>item!==key);
     row={...row,state:'settled',reservedUnits:0,requiredUnits:0,chargedUnits:units,carryNanos:state.carryNanos,finishedAt:Date.now()};
     await write(owner,ACCOUNT,state);await write(owner,key,row);
@@ -59,17 +56,18 @@ export function assistantMediaBilling(store){
     for(const key of current.value.pending)if(key.startsWith(PREFIX))await settleKey(owner,key);
   };
   const begin=async(owner,id,digest,price,quote,parameters)=>store.transaction(async()=>{
+    const user=await getUser(owner);
     const prior=await find(owner,id);
     if(prior){
       if(prior.row.request_hash!==digest)throw new ApiError(409,'MEDIA_IDEMPOTENCY_CONFLICT','同一生成编号已有不同内容的财务记录');
       return {created:false,billing:receipt(prior.value,await getUser(owner))};
     }
-    const state=await account(owner),user=await getUser(owner);
+    const state=await account(owner);
     if(user.disabled)throw new ApiError(403,'ACCOUNT_DISABLED','账号不可用');
     for(const pendingKey of state.pending){
       const pending=await read(owner,pendingKey);
       if(pending?.value.state==='settlement_pending'){
-        const debt=pending.value,extra=debt.type==='assistant_media_billing_v1'?debt.requiredUnits??0:Math.max(0,(debt.requiredUnits??0)-availablePointUnits(user));
+        const debt=pending.value,extra=debt.type==='assistant_media_billing_v1'?debt.requiredUnits??0:Math.max(0,(debt.requiredUnits??0)-availablePointUnits(user)-(debt.reservedUnits??0));
         throw new ApiError(402,'ASSISTANT_POINTS_REQUIRED','已有真实用量待补足点数，请充值后继续；未提交新的生成请求',
           {...pairs('requiredPoints',extra),...pairs('pointsAvailable',availablePointUnits(user)),pointsUnitScale:100});
       }
@@ -83,7 +81,7 @@ export function assistantMediaBilling(store){
     const safeParameters=Object.fromEntries(parameterNames.filter(name=>Object.hasOwn(parameters,name)).map(name=>[name,parameters[name]]));
     const row={type:'assistant_media_billing_v1',jobId:id,price,quote,parameters:safeParameters,state:'pending',
       reservedUnits:units,chargedUnits:0,requiredUnits:0,submissionAttempted:false,providerTerminal:false,startedAt:Date.now(),nextPollAt:0};
-    if(units)await store.run('UPDATE users SET points_reserved=ROUND(points_reserved+?,2),revision=revision+1 WHERE id=?',pointValue(units),owner);
+    await wallet.reserve(owner,keyFor(id),units,digest);
     await store.run('INSERT INTO confirmations(owner_id,idempotency_key,request_hash,result) VALUES(?,?,?,?)',owner,keyFor(id),digest,JSON.stringify(row));
     state.pending.push(keyFor(id));await write(owner,ACCOUNT,state);
     return {created:true,billing:receipt(row,await getUser(owner))};
@@ -135,8 +133,8 @@ export function assistantMediaBilling(store){
     if(['settled','cancelled'].includes(row.state))return receipt(row,await getUser(owner));
     if(row.providerTaskId||row.usage||row.submissionAttempted&&!rejected)return receipt(row,await getUser(owner));
     const state=await account(owner),user=await getUser(owner),reserved=row.reservedUnits??0;
-    if(reserved>pointUnits(user.points_reserved))throw new ApiError(500,'MEDIA_BILLING_RESERVATION_INVALID','媒体预留记录不一致');
-    if(reserved)await store.run('UPDATE users SET points_reserved=ROUND(points_reserved-?,2),revision=revision+1 WHERE id=?',pointValue(reserved),owner);
+    await wallet.reserve(owner,keyFor(id),reserved,found.row.request_hash);
+    await wallet.release(owner,keyFor(id));
     row.state='cancelled';row.reservedUnits=0;row.chargedUnits=0;row.feeNanos='0';row.finishedAt=Date.now();
     state.pending=state.pending.filter(key=>key!==keyFor(id));await write(owner,ACCOUNT,state);await write(owner,keyFor(id),row);
     return receipt(row,await getUser(owner));

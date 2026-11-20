@@ -1,5 +1,5 @@
 import {ApiError,fields,text,id,sha256,authenticate} from './security.js';
-import {userInfo,points} from './account.js';
+import {userInfo,points,accountInfo} from './account.js';
 import {modelConfig,modelView,sealKey,modelSecret,environmentModelKeyFingerprint,officialModelTest,providerFailureCode} from './models.js';
 import {precisePointsRequest} from './point-values.js';
 import {environmentModelSlot} from './model-catalog.js';
@@ -17,7 +17,7 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,ba
     if(req.query.disabled!==undefined){if(!['true','false'].includes(req.query.disabled))throw new ApiError(400,'INVALID_REQUEST','disabled无效');where.push('disabled=?');args.push(req.query.disabled==='true'?1:0);}
     const page=await sqlPage(req,`SELECT * FROM users ${where.length?'WHERE '+where.join(' AND '):''} ORDER BY created_at DESC,id`,args);for(let i=0;i<page.items.length;i++)page.items[i]=await userInfo(store,page.items[i]);return page;
   });
-  const user=async req=>{const u=await store.get('SELECT * FROM users WHERE id=?',req.params.id);if(!u)missing();return u;};
+  const user=async req=>{const u=await store.get('SELECT * FROM users WHERE id=?',req.params.id);if(!u)missing();await accountInfo(store,u);return await store.get('SELECT * FROM users WHERE id=?',u.id);};
   const change=async(req,allowed,action,fn)=>{fields(req.body,allowed);const reason=text(req.body.reason,'reason',1,2000);return await idem(req,sha256(JSON.stringify(req.body)),async()=>{const u=await user(req);if(req.body.expectedRevision!==undefined&&req.body.expectedRevision!==u.revision)conflict();const result=await fn(u,reason);await store.audit(req.auth.user_id,action,u.id,{reason});return result??await userInfo(store,await store.get('SELECT * FROM users WHERE id=?',u.id));});};
   app.post('/v1/admin/users/:id/membership',{preHandler:admin},async req=>await change(req,['membership','membershipExpiresAt','expectedRevision','reason'],'membership',async(u)=>{
     if(req.body.expectedRevision!==u.revision)conflict();if(!['free','sponsor'].includes(req.body.membership))throw new ApiError(400,'INVALID_REQUEST','会员类型无效');
