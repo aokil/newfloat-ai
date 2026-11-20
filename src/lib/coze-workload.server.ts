@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { Client } from '@coze/workload-identity';
 import { diagnoseWorkloadEnvResponse } from './coze-workload-response-diagnostics.server';
 import type { WorkloadEnvResponseDiagnostics } from './coze-workload-response-diagnostics.server';
+import { cozePhoneProvider, COZE_PHONE_BINDING_NAMES } from '../../question-bank/server/src/coze-phone-config.js';
 
 const PROJECT_ID = '7689833705046130729';
 const FAILURE_COOLDOWN_MS = 10_000;
@@ -252,16 +253,17 @@ export function getInjectedProjectResources(): WorkloadProjectResources | null {
 /** Trust the owner's audited Coze deployment configuration, not local metadata
  * as a remote resource-ownership assertion. No DEV/general resource fallback. */
 function productionConfigurationHash(): string | null {
+  try { cozePhoneProvider(process.env); } catch { return null; }
   const workloadToken = process.env.COZE_WORKLOAD_IDENTITY_API_KEY?.trim();
   const projectToken = process.env.COZE_API_TOKEN?.trim();
   const injected = getInjectedProjectResources();
   if (phase() !== 'PROD' || !workloadToken || (projectToken && projectToken !== workloadToken) ||
     !REQUIRED_ENV.every(name => Boolean(process.env[name]?.trim())) ||
-    !injected?.databaseUrl || !injected.phoneConfiguration ||
+    !injected?.databaseUrl ||
     (state.identityHash !== undefined && state.identityHash !== identityFingerprint()) ||
     (state.phase !== undefined && state.phase !== 'PROD')) return null;
   const resources = ['PGDATABASE_URL_PROD', 'TIYU_SUPABASE_URL_PROD', 'TIYU_SUPABASE_ANON_KEY_PROD',
-    'COZE_DEVBOX_ENV', 'PROJECT_PATH', 'COZE_WORKSPACE_PATH', 'TIYU_GATEWAY_KEY', 'BOOTSTRAP_ADMIN_PHONE', 'BAICHUAN_API_KEY', 'DEEPSEEK_API_KEY'];
+    'COZE_DEVBOX_ENV', 'PROJECT_PATH', 'COZE_WORKSPACE_PATH', 'TIYU_GATEWAY_KEY', 'BOOTSTRAP_ADMIN_PHONE', 'BAICHUAN_API_KEY', 'DEEPSEEK_API_KEY',...COZE_PHONE_BINDING_NAMES];
   return createHash('sha256').update(JSON.stringify([identityFingerprint(),
     ...resources.map(name => [name, process.env[name] ?? null])])).digest('hex');
 }
@@ -289,10 +291,9 @@ export function productionConfigurationUnchanged(): boolean {
 
 function resourceBindingsMatch(left: WorkloadProjectResources | null | undefined,
   right: WorkloadProjectResources | null | undefined): boolean {
-  if (!left?.databaseUrl || !left.phoneConfiguration?.supabaseUrl || !left.phoneConfiguration.anonKey ||
-    !right?.databaseUrl || !right.phoneConfiguration?.supabaseUrl || !right.phoneConfiguration.anonKey) return false;
+  if (!left?.databaseUrl || !right?.databaseUrl) return false;
   const digest = (resources: WorkloadProjectResources): Buffer => createHash('sha256').update(JSON.stringify([
-    resources.databaseUrl, resources.phoneConfiguration?.supabaseUrl, resources.phoneConfiguration?.anonKey,
+    resources.databaseUrl, resources.phoneConfiguration?.supabaseUrl??null, resources.phoneConfiguration?.anonKey??null,
   ])).digest();
   return timingSafeEqual(digest(left), digest(right));
 }
@@ -304,7 +305,7 @@ export async function verifyProductionWorkloadResources(): Promise<boolean> {
   const identityHash = identityFingerprint();
   const injected = getInjectedProjectResources();
   if (currentPhase !== 'PROD' || (state.identityHash !== undefined && identityHash !== state.identityHash) ||
-    !injected?.databaseUrl || !injected.phoneConfiguration) return false;
+    !injected?.databaseUrl) return false;
   try {
     // Existing single-flight/cache performs the official OAuth exchange and /env request.
     const official = await getWorkloadProjectResources();

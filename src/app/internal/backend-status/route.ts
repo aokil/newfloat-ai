@@ -29,14 +29,15 @@ type Environment = 'DEV' | 'PROD';
 type BackendStatus = { ready: boolean; code: string | null; status: 'ok' | null;
   schemaVersion: number | null; storage: 'postgres' | null;
   initialization?: ReturnType<typeof nativeBackendFailure> };
-type BackendProbe = { status: BackendStatus; phoneReady: boolean };
+type BackendProbe = { status: BackendStatus; phoneReady: boolean; phoneProvider?: 'supabase' | 'aliyun_pnvs' };
 type ModelsStatus = { ready: boolean; code: string | null; items: CozeModelMetadata['items'];
   source?: CozeModelMetadata['source']; retrievedAt?: string | null;
   generationVerified?: false;
   diagnostics?: CozeIntegrationFailure | null };
 type PhoneStatus = { ready: boolean; code: string | null; backendReady: boolean;
   phone_enabled_supported: boolean; phone_enabled: boolean | null;
-  source?: 'supabase-settings' | 'coze-auth-config';
+  source?: 'supabase-settings' | 'coze-auth-config' | 'aliyun-runtime-config';
+  provider?: 'supabase' | 'aliyun_pnvs'; deliveryVerified?: false;
   diagnostics?: CozeIntegrationFailure | { stage: string; businessCode: number } };
 type StatusPayload = { projectId: string; environment: Environment | null; ready: boolean;
   identity: { ready: boolean; code: string | null; runtimePlatform: 'cloud' | 'local' | null;
@@ -100,7 +101,12 @@ async function backendStatus(): Promise<BackendProbe> {
     return await deadline((async () => {
       const app = await getNativeBackend();
       let phoneReady = false;
-      try { phoneReady = app.getDecorator<unknown>('phoneReady') === true; } catch { /* No decorator means not ready. */ }
+      let phoneProvider: BackendProbe['phoneProvider'];
+      if(app.hasDecorator('phoneProviderStatus')) {
+        const selection: unknown = await app.getDecorator<() => Promise<unknown>>('phoneProviderStatus')();
+        if(!record(selection)||!['supabase','aliyun_pnvs'].includes(String(selection.provider)))throw new Error('PHONE_STATUS_INVALID');
+        phoneProvider=selection.provider as BackendProbe['phoneProvider'];phoneReady=selection.ready===true;
+      } else try { phoneReady = app.getDecorator<unknown>('phoneReady') === true; } catch { /* No decorator means not ready. */ }
       const health = await app.inject({ method: 'GET', url: '/health' });
       if (health.statusCode !== 200 || Buffer.byteLength(health.body, 'utf8') > 4_096) {
         return { status: unavailableStatus, phoneReady };
@@ -114,7 +120,7 @@ async function backendStatus(): Promise<BackendProbe> {
         return { status: { ...unavailableStatus, code: 'COZE_BACKEND_STORAGE_MISMATCH' }, phoneReady };
       }
       return { status: { ready: true, code: null, status: 'ok' as const,
-        schemaVersion: value.schemaVersion, storage: 'postgres' as const }, phoneReady };
+        schemaVersion: value.schemaVersion, storage: 'postgres' as const }, phoneReady,phoneProvider };
     })(), 25_000);
   } catch {
     return { status: { ...unavailableStatus, initialization: nativeBackendFailure() }, phoneReady: false };
@@ -263,8 +269,12 @@ export async function GET(request: Request): Promise<Response> {
     scopedPhoneInjected: Boolean(getInjectedProjectResources()?.phoneConfiguration) };
   let probes: [BackendProbe, ModelsStatus, PhoneStatus];
   try {
-    probes = await deadline(Promise.all([backendStatus(), modelsStatus(), phoneStatus(config, request, knownEnvironment, expiresAt)]),
-      Math.max(1, expiresAt - Date.now()));
+    probes = await deadline(Promise.all([backendStatus(), modelsStatus()]).then(async ([backend,models]): Promise<[BackendProbe,ModelsStatus,PhoneStatus]> => {
+      const phone: PhoneStatus=backend.phoneProvider==='aliyun_pnvs'?{ready:false,code:null,
+        backendReady:false,phone_enabled_supported:false,phone_enabled:null,source:'aliyun-runtime-config',
+        provider:'aliyun_pnvs',deliveryVerified:false}:await phoneStatus(config,request,knownEnvironment,expiresAt);
+      return [backend,models,phone];
+    }),Math.max(1, expiresAt - Date.now()));
   } catch {
     return response({ ...unavailable('COZE_BACKEND_STATUS_TIMEOUT', knownEnvironment), identity,
       workload: workloadRuntimeStatus() });
@@ -275,7 +285,7 @@ export async function GET(request: Request): Promise<Response> {
   }
   const [backend, models, phone] = probes;
   phone.backendReady = backend.status.ready && backend.phoneReady;
-  phone.ready = phone.backendReady && phone.phone_enabled === true;
+  phone.ready = phone.backendReady && (phone.provider==='aliyun_pnvs'||phone.phone_enabled === true);
   if (!phone.ready && phone.code === null) phone.code = 'PHONE_BACKEND_UNAVAILABLE';
   return response({ projectId: PROJECT_ID, environment: knownEnvironment,
     ready: backend.status.ready && models.ready && phone.ready,

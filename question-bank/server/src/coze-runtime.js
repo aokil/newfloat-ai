@@ -2,8 +2,18 @@ import {createHmac} from 'node:crypto';
 import {buildApp} from './app.js';
 import {PostgresStore} from './postgres-store.js';
 import {configuredSupabasePhone} from './supabase-phone.js';
+import {configuredAliyunPnvsPhone} from './aliyun-pnvs.js';
+import {cozePhoneEnvironment,cozePhoneProvider} from './coze-phone-config.js';
 import {configuredAlipayTransport} from './alipay.js';
 import {AndroidReleaseCampaign} from './android-release-campaign.js';
+
+export function configuredCozePhones(env,phoneConfiguration,options={}) {
+  const phoneEnv=cozePhoneEnvironment(env);
+  return {supabase:configuredSupabasePhone({SMS_PROVIDER:'supabase',
+    SUPABASE_URL:phoneConfiguration?.supabaseUrl||env.COZE_SUPABASE_URL,
+    SUPABASE_ANON_KEY:phoneConfiguration?.anonKey||env.COZE_SUPABASE_ANON_KEY},options.supabase),
+    aliyun_pnvs:configuredAliyunPnvsPhone({...phoneEnv,SMS_PROVIDER:'aliyun_pnvs'},options.aliyun)};
+}
 
 /** Native Coze entry; credentials arrive in memory from the platform SDK. */
 export async function createCozeApp({databaseUrl,phoneConfiguration,cozeBridge,env=process.env}) {
@@ -18,20 +28,18 @@ export async function createCozeApp({databaseUrl,phoneConfiguration,cozeBridge,e
     throw new Error('COZE_RUNTIME_KEY_UNAVAILABLE');
   const derive=context=>createHmac('sha256',gatewayKey).update(context).digest();
   const paymentTransport=configuredAlipayTransport(env);
-  const phoneVerifier=configuredSupabasePhone({SMS_PROVIDER:'supabase',
-    SUPABASE_URL:phoneConfiguration?.supabaseUrl || env.COZE_SUPABASE_URL,
-    SUPABASE_ANON_KEY:phoneConfiguration?.anonKey || env.COZE_SUPABASE_ANON_KEY});
+  const phoneProviders=configuredCozePhones(env,phoneConfiguration);
   const store=await PostgresStore.open({connectionString:databaseUrl,schema:'float_ai',max:5,
     application_name:`float-ai-${env.COZE_PROJECT_ENV.toLowerCase()}`,statement_timeout:15000});
   try {
-    const app=await buildApp({store,phoneVerifier,cozeBridge,paymentTransport,
+    const app=await buildApp({store,phoneProviders,phoneProviderEnvironment:env.COZE_PROJECT_ENV,defaultPhoneProvider:cozePhoneProvider(env),allowVerifiedPhoneRecovery:true,cozeBridge,paymentTransport,
       smsHmacKey:derive('float-ai/sms-proof/v1').toString('hex'),
       modelMasterKey:env.MODEL_MASTER_KEY || derive('float-ai/model-key/v1').toString('base64'),
       baichuanApiKey:env.BAICHUAN_API_KEY || null,
       deepseekApiKey:env.DEEPSEEK_API_KEY || null,
       bootstrapAdminPhone:env.BOOTSTRAP_ADMIN_PHONE || null,trustProxy:1,
       androidReleaseCampaign:env.COZE_PROJECT_ENV==='PROD'?new AndroidReleaseCampaign():null});
-    app.decorate('phoneReady',Boolean(phoneVerifier));
+    app.decorate('phoneReady',(await app.getDecorator('phoneProviderStatus')()).ready);
     await app.ready();
     return app;
   } catch (error) {await store.close(); throw error;}

@@ -8,6 +8,7 @@ import { ApiError, credentials, fields, text, newPassword, phoneNumber, hashPass
 import { parseFile } from './parser.js';
 import { inspectQuestion, TYPES } from './questions.js';
 import { SmsService } from './sms.js';
+import {PhoneProviderService,phoneProviderRoutes} from './phone-provider.js';
 import { ExternalPhoneService } from './external-phone.js';
 import { accountInfo, points, requirePositivePoints, requireImportAccess } from './account.js';
 import { adminRoutes } from './admin-routes.js';
@@ -68,7 +69,7 @@ function indexedQuestions(payload) {
     });
     return { questions, typeCounts: { ...counts } };
 }
-export async function buildApp({ database = ':memory:', store: providedStore = null, logger = false, rateLimits = true, smsTransport = null, smsHmacKey = null, smsLimits = true, phoneVerifier = null, testHooks = {}, modelMasterKey = null, baichuanApiKey = null, deepseekApiKey = null, modelTransport, aiTransport, cozeBridge = null, paymentTransport = null, appUpdateDirectory = null, trustProxy = ['127.0.0.1', '::1'], bootstrapAdminPhone = null, androidReleaseCampaign = null } = {}) {
+export async function buildApp({ database = ':memory:', store: providedStore = null, logger = false, rateLimits = true, smsTransport = null, smsHmacKey = null, smsLimits = true, phoneVerifier = null, phoneProviders = null, phoneProviderEnvironment = null, defaultPhoneProvider = 'supabase', allowVerifiedPhoneRecovery = false, testHooks = {}, modelMasterKey = null, baichuanApiKey = null, deepseekApiKey = null, modelTransport, aiTransport, cozeBridge = null, paymentTransport = null, appUpdateDirectory = null, trustProxy = ['127.0.0.1', '::1'], bootstrapAdminPhone = null, androidReleaseCampaign = null } = {}) {
     const store = providedStore || await AsyncSqliteStore.open(database);
     if (bootstrapAdminPhone !== null) bootstrapAdminPhone = phoneNumber(bootstrapAdminPhone);
     // Runtime readiness is shared with catalog/account checks; no credentials or
@@ -88,7 +89,8 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         });
     }
     await recoverModelTests();
-    const sms = phoneVerifier ? new ExternalPhoneService(store, { verifier: phoneVerifier, limits: smsLimits }) : new SmsService(store, { transport: smsTransport, hmacKey: smsHmacKey, limits: smsLimits });
+    const phoneService=phoneProviders?new PhoneProviderService(store,{verifiers:phoneProviders,environment:phoneProviderEnvironment,defaultProvider:defaultPhoneProvider,limits:smsLimits,allowVerifiedPhoneRecovery}):null;
+    const sms = phoneService || (phoneVerifier ? new ExternalPhoneService(store, { verifier: phoneVerifier, limits: smsLimits, allowVerifiedPhoneRecovery }) : new SmsService(store, { transport: smsTransport, hmacKey: smsHmacKey, limits: smsLimits }));
     await sms.initialize();
     const app = Fastify({ logger: logger ? { level: 'info', redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body.apiKey', 'req.body.byok.apiKey', 'req.body.image', 'res.headers.set-cookie'] } : false,
         bodyLimit: 4 * 1024 * 1024, trustProxy, requestTimeout: 30000 });
@@ -177,7 +179,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
             return result;
         }
         catch (error) {
-            if (phoneVerifier) {
+            if (phoneService || phoneVerifier) {
                 if (error instanceof ApiError)
                     throw new ApiError(error.statusCode, error.code, error.message + '；请重新获取验证码');
                 throw new ApiError(503, 'UNAVAILABLE', '注册未完成，请重新获取验证码');
@@ -255,7 +257,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
             reply.code(204).send();
         }
         catch (error) {
-            if (phoneVerifier) {
+            if (phoneService || phoneVerifier) {
                 if (error instanceof ApiError)
                     throw new ApiError(error.statusCode, error.code, error.message + '；请重新获取验证码');
                 throw new ApiError(503, 'UNAVAILABLE', '密码重设未完成，请重新获取验证码');
@@ -785,6 +787,8 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
         });
     });
     adminRoutes(app, { store, auth, admin, idem, integer, modelMasterKey, baichuanApiKey, deepseekApiKey, modelTransport, cozeBridge });
+    phoneProviderRoutes(app,{service:phoneService,admin,idem});
+    if(phoneService)app.decorate('phoneProviderStatus',()=>phoneService.status());
     communityRoutes(app,{store,auth,admin,idem,integer});
     await aiRoutes(app, { store, auth, modelMasterKey, baichuanApiKey, deepseekApiKey, aiTransport, cozeBridge, rateLimits });
     await importRepairRoutes(app, {store,auth,cozeBridge});

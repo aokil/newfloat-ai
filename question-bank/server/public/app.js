@@ -277,8 +277,8 @@ function accountHeader(){if(!session)return;const a=session.account||{};const ac
 async function updateMe(){const me=await api('/v1/me');session={...session,...me};accountHeader();}
 function signedIn(next){disposeAuthScene();shell.classList.remove('signed-out');epoch++;session=next;web.loadPreferences();accountHeader();buildNav();void perform(async()=>{await show('banks');const saved=epoch;const data=await api('/v1/announcements');if(saved!==epoch||!data.items.length)return;const a=data.items[0];let box;box=dialog(a.title,[el('div',{class:'pre'},a.body),el('p',{class:'muted'},'')],'此版本不再提醒',async()=>{await api(`/v1/announcements/${a.id}/dismiss`,{method:'POST',body:{version:a.version}});notify('已设置当前版本不再提醒');});});}
 function buildNav(){nav?.remove();nav=el('nav',{'aria-label':'主导航',class:'main-nav'});const links=[['search','搜题'],['banks','题库'],['profile','我的']];if(session.principal.roles.includes('admin'))links.push(['users','管理']);for(const[key,label]of links){const b=button(label,()=>show(key));b.dataset.page=key;nav.append(b);}shell.prepend(nav);}
-function sectionFor(name){return ['users','review','releases','models','manageAnnouncements','audit'].includes(name)?'users':['banks','imports'].includes(name)?'banks':['search','userModels','modelSettings','byok'].includes(name)?'search':'profile';}
-function secondaryNav(name){const group=sectionFor(name);const groups={banks:[],search:[],users:[['users','用户管理'],['review','题库审核'],['releases','发布记录'],['models','AI 模型'],['manageAnnouncements','公告管理'],['audit','操作日志']],profile:[]};const links=groups[group]||[];const tabs=links.map(([key,label])=>{const b=button(label,()=>show(key),name===key?'selected':'');b.dataset.page=key;if(name===key)b.setAttribute('aria-current','page');return b;});$('subnav').className=group==='users'?'admin-subnav':'';if(group==='users'){const picker=select('管理分区',Object.fromEntries(links),name);picker.node.classList.add('subnav-select');picker.input.addEventListener('change',()=>{const page=picker.input.value;void perform(()=>show(page));});tabs.push(picker.node);}$('subnav').replaceChildren(...tabs);document.querySelectorAll('.main-nav button').forEach(b=>{b.classList.toggle('selected',b.dataset.page===group);if(b.dataset.page===group)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});}
+function sectionFor(name){return ['users','review','releases','models','phoneProvider','manageAnnouncements','audit'].includes(name)?'users':['banks','imports'].includes(name)?'banks':['search','userModels','modelSettings','byok'].includes(name)?'search':'profile';}
+function secondaryNav(name){const group=sectionFor(name);const groups={banks:[],search:[],users:[['users','用户管理'],['review','题库审核'],['releases','发布记录'],['models','AI 模型'],['phoneProvider','短信服务'],['manageAnnouncements','公告管理'],['audit','操作日志']],profile:[]};const links=groups[group]||[];const tabs=links.map(([key,label])=>{const b=button(label,()=>show(key),name===key?'selected':'');b.dataset.page=key;if(name===key)b.setAttribute('aria-current','page');return b;});$('subnav').className=group==='users'?'admin-subnav':'';if(group==='users'){const picker=select('管理分区',Object.fromEntries(links),name);picker.node.classList.add('subnav-select');picker.input.addEventListener('change',()=>{const page=picker.input.value;void perform(()=>show(page));});tabs.push(picker.node);}$('subnav').replaceChildren(...tabs);document.querySelectorAll('.main-nav button').forEach(b=>{b.classList.toggle('selected',b.dataset.page===group);if(b.dataset.page===group)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});}
 async function signOut(){const old=session;clearSession();try{await raw('/v1/auth/logout',{method:'POST',body:{refreshToken:old.refreshToken,clientId:'web'}});}finally{notify('已退出');}}
 function disposeAuthScene(){authScene?.dispose();authScene=null;document.body.classList.remove('auth-screen');}
 function createAuthScene(){
@@ -389,18 +389,76 @@ const bankBrowser=window.TiyuBankBrowser({
 async function confirmImport(info){const banks=(await allBanks()).filter(b=>b.visibility==='private'),title=field('题库名称','text',info.title),target=select('保存方式',{'':'新建个人题库',...Object.fromEntries(banks.map(b=>[b.bankId,'替换：'+b.title]))},'');const key=crypto.randomUUID();dialog('确认个人入库',[el('p',{class:'muted'},'个人题库仅你和管理员可见。替换私库不影响已发布版本。'),title.node,target.node],'确认私人入库',async()=>{const body={expectedRevision:info.revision,title:inputValue(title)};if(inputValue(target)){const bank=banks.find(b=>b.bankId===inputValue(target));body.bankId=bank.bankId;body.expectedBankVersion=bank.dataVersion;}await mutation(`/v1/imports/${info.importId}/confirm`,body,'POST',key);notify('已入库，App更新后可查。');await show('banks');});}
 async function download(path){const token=session?.accessToken;if(!token)throw Error('请先登录');const saved=epoch;const response=await fetch(path,{headers:{Authorization:'Bearer '+token},cache:'no-store',credentials:'omit',redirect:'error'});if(!response.ok)throw Error('原件下载失败；请刷新登录状态后重试');const blob=await response.blob();if(saved!==epoch)throw Error('账号已改变');const url=URL.createObjectURL(blob),a=el('a',{href:url,download:'题库原件'});document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 const pages={
+phoneProvider:async alive=>{
+  const initial=await api('/v1/admin/phone-provider');if(!alive())return;
+  heading('短信服务','选择注册和找回密码使用的验证码通道。');
+  let state=initial,requestKey=null,pending=false;
+  const current=el('p',{role:'status'}),availability=el('div',{class:'phone-provider-availability'});
+  const choice=select('短信通道',Object.fromEntries(state.providers.map(p=>[p.provider,p.displayName])),state.provider||'');
+  const error=el('p',{class:'error-text',role:'alert'});
+  const save=button('切换通道',async()=>{
+    pending=true;error.textContent='';update();
+    try{
+      requestKey??=crypto.randomUUID();
+      state=await mutation('/v1/admin/phone-provider',{provider:inputValue(choice),expectedRevision:state.revision},'PUT',requestKey);
+      requestKey=null;if(!alive())return;render();notify('短信通道已切换，新验证码立即使用所选通道');
+    }catch(e){if(alive())showFormError(error,e.message);}
+    finally{pending=false;if(alive())update();}
+  },'primary');
+  const refresh=button('刷新状态',async()=>{
+    pending=true;error.textContent='';update();
+    try{state=await api('/v1/admin/phone-provider');requestKey=null;if(alive())render();}
+    catch(e){if(alive())showFormError(error,e.message);}
+    finally{pending=false;if(alive())update();}
+  });
+  function update(){
+    choice.input.disabled=pending;refresh.disabled=pending;
+    const selected=state.providers.find(p=>p.provider===inputValue(choice));
+    save.disabled=pending||!selected?.configured||selected.provider===state.provider;
+  }
+  function render(){
+    const active=state.providers.find(p=>p.provider===state.provider);
+    current.textContent='当前通道：'+(active?.displayName||'未配置')+(state.ready?'':' · 不可用');
+    availability.replaceChildren(...state.providers.map(p=>el('div',{class:'row'},el('span',{},p.displayName),pill(p.configured?'已配置':'未配置',p.configured?'good':''))));
+    choice.input.value=state.provider||'';
+    for(const option of choice.input.options)option.disabled=!state.providers.find(p=>p.provider===option.value)?.configured;
+    update();
+  }
+  choice.input.addEventListener('change',()=>{requestKey=null;error.textContent='';update();});
+  main.append(el('section',{class:'phone-provider-settings'},current,availability,choice.node,
+    el('p',{class:'muted'},'已发送的验证码继续由原通道核验，有效期内仍可使用。'),error,el('div',{class:'row'},save,refresh)));
+  render();
+},
 profile:alive=>web.pages.profile(alive),
 banks:alive=>web.pages.banks(alive),
 imports:alive=>web.pages.imports(alive),
 announcements:async alive=>{const r=await api('/v1/announcements?includeDismissed=true');if(!alive())return;heading('公告','');main.append(...(r.items.length?r.items.map(a=>el('article',{class:'card'},el('h2',{},a.title),el('p',{class:'muted'},date(a.publishedAt)),el('div',{class:'pre'},a.body),button('此版本不再提醒',async()=>{await api(`/v1/announcements/${a.id}/dismiss`,{method:'POST',body:{version:a.version}});notify('已设置当前版本不再提醒');}))):[el('div',{class:'card empty'},'暂无公告')]));},
 ledger:async alive=>{await updateMe();if(!alive())return;heading('点数明细',`可用 ${session.account?.pointsAvailable??0} 点。点数用于 AI 调用，本地题库检索不扣点。`);await paged('/v1/me/points-ledger',['时间','变动','变动前','变动后','原因'],i=>[date(i.createdAt),`${i.delta>0?'+':''}${i.delta}`,i.balanceBefore,i.balanceAfter,i.reason]);},
-users:async alive=>{if(!alive())return;heading('用户管理','');const search=field('搜索手机号或显示名'),submit=button('搜索',async()=>{container.replaceChildren();await list();});main.append(el('div',{class:'row toolbar'},search.node,submit));const container=el('section');main.append(container);async function list(){await paged('/v1/admin/users'+(inputValue(search)?'?search='+encodeURIComponent(inputValue(search)):''),['用户','注册 / 最近登录','会员 / 试用','点数','状态','操作'],u=>[el('div',{},u.phoneNumber,el('p',{class:'muted'},u.displayName),pill(u.phoneVerified?'手机已验证':'未验证')),el('div',{},date(u.registeredAt),el('p',{class:'muted'},date(u.lastLoginAt))),el('div',{},pill(u.membership==='sponsor'?'赞助版':'Free'),el('p',{class:'muted'},u.membership==='sponsor'?'到期：'+(u.membershipExpiresAt?date(u.membershipExpiresAt):'长期'):'试用至：'+date(u.trialEndsAt))),`${u.pointsAvailable} 可用 / ${u.pointsBalance} 总额`,pill(u.disabled?'已禁用':'正常',u.disabled?'bad':'good'),actions(button('会员',()=>membership(u)),button('点数',()=>adjustPoints(u)),button('流水',()=>userLedger(u)),button(u.disabled?'启用':'禁用',()=>userStatus(u),u.disabled?'':'danger'),button('强制退出',()=>revoke(u)))],container);}await list();},
+users:async alive=>{if(!alive())return;heading('用户管理','');const search=field('搜索手机号或显示名'),submit=button('搜索',async()=>{container.replaceChildren();await list();});main.append(el('div',{class:'row toolbar'},search.node,submit,button('创建账号',()=>createUser(),'primary')));const container=el('section');main.append(container);async function list(){await paged('/v1/admin/users'+(inputValue(search)?'?search='+encodeURIComponent(inputValue(search)):''),['用户','注册 / 最近登录','会员 / 试用','点数','状态','操作'],u=>[el('div',{},u.phoneNumber,el('p',{class:'muted'},u.displayName),pill(u.phoneVerified?'手机已验证':'未验证')),el('div',{},date(u.registeredAt),el('p',{class:'muted'},date(u.lastLoginAt))),el('div',{},pill(u.membership==='sponsor'?'赞助版':'Free'),el('p',{class:'muted'},u.membership==='sponsor'?'到期：'+(u.membershipExpiresAt?date(u.membershipExpiresAt):'长期'):'试用至：'+date(u.trialEndsAt))),`${u.pointsAvailable} 可用 / ${u.pointsBalance} 总额`,pill(u.disabled?'已禁用':'正常',u.disabled?'bad':'good'),actions(button('会员',()=>membership(u)),button('点数',()=>adjustPoints(u)),button('流水',()=>userLedger(u)),button(u.disabled?'启用':'禁用',()=>userStatus(u),u.disabled?'':'danger'),button('强制退出',()=>revoke(u)))],container);}await list();},
 review:async alive=>{if(!alive())return;heading('题库审核','审核通过后，仍需明确发布。');main.append(el('h2',{},'个人题库'));await paged('/v1/admin/banks',['题库','所有者','题数','操作'],b=>[b.title,b.ownerUserId,b.questionCount,button('审阅具体版本',()=>reviewBank(b))]);main.append(el('h2',{},'上传记录'));await paged('/v1/admin/imports',['原文件','所有者','状态','操作'],i=>[i.filename,i.ownerUserId,states[i.status]||i.status,button('下载原件',()=>download(`/v1/admin/imports/${i.importId}/source`))]);},
 releases:async alive=>{if(!alive())return;heading('发布记录','撤回后，用户更新时移除对应题库。');await paged('/v1/admin/releases',['题库','发布版本','状态','操作'],r=>[r.title,r.dataVersion,pill(states[r.state]||r.state,r.state==='published'?'good':''),r.state==='published'?button('撤回',()=>{const reason=el('p',{},`撤回“${r.title}”后不再下发此公共版本。`);dialog('撤回公共发布',[reason],'确认撤回',async operationKey=>{await mutation(`/v1/admin/releases/${r.releaseId}/withdraw`,{},'POST',operationKey);notify('已撤回');await show('releases');});},'danger'):'—']);},
 models:async alive=>{if(!alive())return;heading('AI 模型','选择接入方式和实际型号，测试通过后启用。');main.append(el('div',{class:'toolbar'},button('添加模型',()=>modelForm(null),'primary')));await paged('/v1/admin/models',['模型','接入 / 计价','状态','最近测试','操作'],m=>[el('div',{},m.displayName,el('p',{class:'muted'},m.provider+' · '+m.modelId)),el('div',{},m.execution==='coze'?'Coze 内置集成':m.keyConfigured?'官方 API · 已配置密钥':'官方 API · 未配置密钥',el('p',{class:'muted'},`${m.pointsPerCall}点/次`),m.execution==='coze'&&!m.bridgeReady?pill('集成未就绪','bad'):null),pill(m.enabled?'启用':'停用',m.enabled?'good':''),el('div',{},states[m.lastTestStatus]||m.lastTestStatus,el('p',{class:'muted'},date(m.lastTestAt)),m.lastTestErrorCode||''),modelActions(m)]);},
 manageAnnouncements:async alive=>{if(!alive())return;heading('公告管理','');main.append(el('div',{class:'toolbar'},button('新建公告',()=>announcementForm(null),'primary')));await paged('/v1/admin/announcements',['标题','受众','状态','版本 / 时间','操作'],a=>[a.title,{all:'所有用户',free:'Free',sponsor:'赞助版'}[a.audience],states[a.status]||a.status,el('div',{},`第${a.version}版`,el('p',{class:'muted'},date(a.publishedAt))),button('编辑 / 发布',()=>announcementForm(a))]);},
 audit:async alive=>{if(!alive())return;heading('操作日志','');await paged('/v1/admin/audit',['时间','操作者','操作','对象','摘要'],i=>[date(i.createdAt),i.actorId||'服务端 CLI',i.action,i.targetId,i.details]);}
 };
+function createUser(){
+  const phone=field('手机号','tel'),password=field('密码','password','','至少6个字符'),confirmation=field('确认密码','password'),name=field('显示名（可选）'),reason=field('创建原因','text','管理员代建账号');
+  phone.input.required=true;phone.input.autocomplete='tel';phone.input.inputMode='tel';phone.input.maxLength=14;phone.input.pattern='(?:\\+86)?1[3-9][0-9]{9}';
+  for(const f of [password,confirmation]){f.input.required=true;f.input.minLength=6;f.input.maxLength=64;f.input.autocomplete='new-password';}
+  name.input.maxLength=128;reason.input.required=true;reason.input.maxLength=2000;
+  const controls=[phone,password,confirmation,name,reason];
+  const box=dialog('创建账号',[el('p',{class:'muted'},'无需短信验证码。创建后可用手机号和密码登录网页及 App，首次赠送10点，可直接使用。'),...controls.map(f=>f.node)],'创建账号',async operationKey=>{
+    if(inputValue(password)!==inputValue(confirmation))throw Error('两次密码不一致');
+    const body={phoneNumber:inputValue(phone),password:inputValue(password),passwordConfirmation:inputValue(confirmation),reason:inputValue(reason),...(inputValue(name).trim()?{displayName:inputValue(name)}:{})};
+    controls.forEach(f=>f.input.disabled=true);
+    try{await mutation('/v1/admin/users',body,'POST',operationKey);password.input.value=confirmation.input.value='';notify('账号已创建，可使用手机号和密码登录');await show('users');}
+    finally{controls.forEach(f=>f.input.disabled=false);}
+  });
+  const title=box.querySelector('h2');title.id='create-user-title';box.setAttribute('aria-labelledby',title.id);
+  box.addEventListener('cancel',event=>{if(box.querySelector('.is-busy'))event.preventDefault();});
+  box.querySelector('button[type=button]').addEventListener('click',event=>{if(box.querySelector('.is-busy')){event.preventDefault();event.stopImmediatePropagation();}},true);
+  box.addEventListener('close',()=>{password.input.value=confirmation.input.value='';});
+}
 function membership(u){const type=select('会员类型',{free:'Free',sponsor:'赞助版'},u.membership),expiry=field('赞助到期时间（留空为长期）','datetime-local',u.membershipExpiresAt?localDate(u.membershipExpiresAt):''),reason=field('修改原因');dialog('修改会员：'+u.phoneNumber,[type.node,expiry.node,reason.node],'保存会员',async operationKey=>{await mutation(`/v1/admin/users/${u.userId}/membership`,{membership:inputValue(type),membershipExpiresAt:inputValue(expiry)?new Date(inputValue(expiry)).toISOString():null,expectedRevision:u.revision,reason:inputValue(reason)},'POST',operationKey);notify('会员状态已更新');await show('users');});}
 function adjustPoints(u){const delta=field('增减点数','number','','正数增加，负数扣除；最多两位小数。'),reason=field('调整原因');delta.input.step='0.01';dialog('调整点数：'+u.phoneNumber,[el('p',{},`总额${u.pointsBalance}点，可用${u.pointsAvailable}点，预留${u.pointsReserved}点。`),delta.node,reason.node],'确认调整',async operationKey=>{await mutation(`/v1/admin/users/${u.userId}/points-adjustments`,{delta:pointNumber(delta),expectedRevision:u.revision,reason:inputValue(reason)},'POST',operationKey);notify('点数已调整并记录流水');await show('users');});}
 async function userLedger(u){const r=await api(`/v1/admin/users/${u.userId}/points-ledger?limit=50`);readDialog(u.phoneNumber+' · 最近50条流水',table(['时间','变动','余额','原因'],r.items.map(i=>[date(i.createdAt),i.delta,i.balanceAfter,i.reason])));}

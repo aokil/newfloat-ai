@@ -9,17 +9,19 @@ const recoveryUnavailable=()=>new ApiError(422,'RECOVERY_UNAVAILABLE','该手机
 
 /** External verification is asynchronous; only a one-request capability reaches the local transaction. */
 export class ExternalPhoneService extends SmsService {
-  constructor(store,{verifier,limits=true,now=Date.now}) {
+  constructor(store,{verifier,limits=true,now=Date.now,allowVerifiedPhoneRecovery=false}) {
     super(store,{limits,now,provider:verifier.provider,issuer:verifier.issuer});this.verifier=verifier;this.proofs=new WeakSet();
+    this.allowVerifiedPhoneRecovery=allowVerifiedPhoneRecovery===true;
   }
-  async initialize() {
-    await super.initialize();
+  async initialize({preserveOtherProviders=false}={}) {
+    if(!preserveOtherProviders)await super.initialize();
     // Other Coze instances may still own a live send/verification operation.
     // Only an expired challenge is safe to recover; uncertain OTPs are never replayed.
     await this.store.run("UPDATE sms_challenges SET state='uncertain',attempt_nonce=NULL WHERE provider<>'local' AND state IN ('sending','verifying') AND expires_at<=?",this.now());
   }
   async canRecover(user) {
     if(!user||user.disabled||!user.phone_verified||!user.phone_number)return false;
+    if(this.allowVerifiedPhoneRecovery)return true;
     return !!await this.store.get('SELECT 1 FROM external_phone_identities WHERE issuer=? AND user_id=? AND phone=?',this.verifier.issuer,user.id,user.phone_number);
   }
   async challenge(raw,ip,options={}) {
@@ -33,7 +35,7 @@ export class ExternalPhoneService extends SmsService {
         challengeId,phone,'',expires,now,sha256(ip||'unknown'),'sending',this.verifier.provider,this.verifier.issuer,context.purpose,context.targetUserId);
     });
     try {
-      await this.verifier.send({phone,createUser:context.purpose==='registration'});
+      await this.verifier.send({phone,challengeId,createUser:context.purpose==='registration'||this.allowVerifiedPhoneRecovery});
       if(this.now()>=expires)throw unavailable();
       const changed=(await this.store.run("UPDATE sms_challenges SET state='sent' WHERE id=? AND state='sending'",challengeId)).changes;
       if(changed!==1)throw unavailable();
@@ -53,7 +55,7 @@ export class ExternalPhoneService extends SmsService {
       await this.store.run("UPDATE sms_challenges SET state='verifying',attempt_nonce=?,attempts=attempts+1 WHERE id=?",nonce,challengeId);
     });
     try {
-      const verified=await this.verifier.verify({phone,code});
+      const verified=await this.verifier.verify({phone,code,challengeId});
       if(verified?.issuer!==this.verifier.issuer||verified.phone!==phone||typeof verified.subject!=='string'||!verified.subject||verified.subject.length>128)throw unavailable();
       const proof=Object.freeze({challengeId,phone,nonce,issuer:verified.issuer,subject:verified.subject,purpose:context.purpose,targetUserId:context.targetUserId});this.proofs.add(proof);return proof;
     }catch(error){
@@ -66,14 +68,24 @@ export class ExternalPhoneService extends SmsService {
   }
   async consumePrepared(proof,userId) {
     if(!this.proofs.has(proof))throw invalid();
+    let enroll=proof.purpose==='registration';
     if(proof.purpose==='registration'){
       if(proof.targetUserId||await this.store.get('SELECT user_id FROM external_phone_identities WHERE issuer=? AND subject=?',proof.issuer,proof.subject))throw new ApiError(409,'VERSION_CONFLICT','外部手机号身份已绑定，请使用原账号登录');
     }else if(proof.purpose==='password_reset'){
-      if(proof.targetUserId!==userId||!await this.store.get('SELECT 1 FROM external_phone_identities WHERE issuer=? AND subject=? AND user_id=? AND phone=?',proof.issuer,proof.subject,userId,proof.phone))throw recoveryUnavailable();
+      if(proof.targetUserId!==userId)throw recoveryUnavailable();
+      const bound=await this.store.get('SELECT user_id,phone FROM external_phone_identities WHERE issuer=? AND subject=?',proof.issuer,proof.subject);
+      if(bound&&(bound.user_id!==userId||bound.phone!==proof.phone))throw recoveryUnavailable();
+      if(!bound){
+        // A provider switch may enroll a newly verified identity only into the same already-verified business phone account.
+        const user=await this.store.get('SELECT * FROM users WHERE id=? AND phone_number=?',userId,proof.phone);
+        if(!this.allowVerifiedPhoneRecovery||!user?.phone_verified||user.disabled)throw recoveryUnavailable();
+        if(await this.store.get('SELECT 1 FROM external_phone_identities WHERE issuer=? AND user_id=?',proof.issuer,userId))throw recoveryUnavailable();
+        enroll=true;
+      }
     }else throw invalid();
     const changed=(await this.store.run("UPDATE sms_challenges SET state='consumed',used_at=?,attempt_nonce=NULL WHERE id=? AND phone=? AND provider=? AND issuer=? AND purpose=? AND COALESCE(target_user_id,'')=? AND state='verifying' AND attempt_nonce=? AND used_at IS NULL AND expires_at>?",this.now(),proof.challengeId,proof.phone,this.verifier.provider,proof.issuer,proof.purpose,proof.targetUserId||'',proof.nonce,this.now())).changes;
     if(changed!==1)throw invalid();
-    if(proof.purpose==='registration')await this.store.run('INSERT INTO external_phone_identities(issuer,subject,user_id,phone,verified_at) VALUES(?,?,?,?,?)',proof.issuer,proof.subject,userId,proof.phone,this.now());
+    if(enroll)await this.store.run('INSERT INTO external_phone_identities(issuer,subject,user_id,phone,verified_at) VALUES(?,?,?,?,?)',proof.issuer,proof.subject,userId,proof.phone,this.now());
   }
   async release(proof) {
     if(!proof)return;
