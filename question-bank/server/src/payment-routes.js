@@ -11,6 +11,7 @@ const NOTIFY_LIMIT=16*1024;
 const OPEN_STATUSES=new Set(['creating','pending','uncertain']);
 const QUERY_INTERVAL=12000;
 const RECOVERY_INTERVAL=30000;
+const CANCELLED_MISSING_TRADE='PAYMENT_CANCELLED_TRADE_NOT_FOUND';
 function absent(){throw new ApiError(404,'PAYMENT_ORDER_NOT_FOUND','支付订单不存在');}
 function unavailable(payment){throw new ApiError(503,payment?.unavailableReason||'PAYMENT_NOT_OPEN','支付宝支付暂未就绪，请稍后重试');}
 function validTransport(payment){return payment?.ready===true&&['precreate','query','verifyNotify'].every(key=>typeof payment[key]==='function');}
@@ -50,6 +51,7 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
     await members.snapshot(row.owner_id);
     const user=await pointWallet(store).user(row.owner_id),plan=membershipPlan(row.package_id);
     const membership=plan?await members.orderReceipt(row.owner_id,row.id):null;
+    const merchantCancelled=row.status==='closed'&&row.error_code===CANCELLED_MISSING_TRADE;
     if(!user)absent();
     return {orderId:row.id,status:row.status,packageId:row.package_id,title:row.package_title,
       amountMinor:row.amount_minor,priceCents:row.amount_minor,amount:amountString(row.amount_minor),currency:'CNY',points:row.points,
@@ -58,9 +60,28 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
       pointsAvailable:availablePoints(user),
       qrCode:row.status==='pending'&&row.expires_at>Date.now()?row.qr_code:null,
       expiresAt:new Date(row.expires_at).toISOString(),paidAt:row.paid_at===null?null:new Date(row.paid_at).toISOString(),
-      errorCode:checkError??row.error_code,confirmationRequired:OPEN_STATUSES.has(row.status),
+      errorCode:checkError??(merchantCancelled?null:row.error_code),confirmationRequired:OPEN_STATUSES.has(row.status),
       expired:row.expires_at<=Date.now(),recoveryEligible:OPEN_STATUSES.has(row.status)&&row.qr_code===null&&row.expires_at>Date.now(),
-      refundReviewRequired:row.error_code==='PAYMENT_REFUND_REVIEW_REQUIRED'};
+      refundReviewRequired:row.error_code==='PAYMENT_REFUND_REVIEW_REQUIRED',merchantCancelled,
+      providerCloseConfirmed:row.status==='closed'&&!merchantCancelled,
+      closeReason:merchantCancelled?'trade_not_found_cancelled':row.status==='closed'?'provider_closed':null};
+  }
+  async function cancelMissingTrade(orderId){
+    return await store.transaction(async()=>{
+      const row=await store.get('SELECT * FROM payment_orders WHERE id=?',orderId);
+      if(!row)throw new AlipayFailure('PAYMENT_OWNER_NOT_FOUND');
+      // This is the user's merchant-side cancellation policy, not an Alipay close receipt.
+      // A payment that won the race must still keep its original fulfillment.
+      if(row.status==='paid'||row.status==='closed')return row;
+      const ledger=await store.get('SELECT delta FROM points_ledger WHERE user_id=? AND idempotency_key=?',row.owner_id,`alipay:${row.id}`);
+      const membership=membershipPlan(row.package_id)?await members.orderReceipt(row.owner_id,row.id):null;
+      if(ledger||membership)throw new AlipayFailure('PAYMENT_LEDGER_INCONSISTENT');
+      const now=Date.now(),proof=sha256(JSON.stringify({source:'merchant-cancel',reason:'trade-not-found',orderId:row.id}));
+      await store.run("UPDATE payment_orders SET status='closed',qr_code=NULL,error_code=?,receipt_hash=?,checked_at=?,updated_at=? WHERE id=? AND status<>'paid'",
+        CANCELLED_MISSING_TRADE,proof,now,now,row.id);
+      await store.audit(row.owner_id,'payment-order-cancelled',row.id,{provider:'alipay',reason:'trade-not-found',providerCloseConfirmed:false});
+      return await store.get('SELECT * FROM payment_orders WHERE id=?',row.id);
+    });
   }
   async function settleClose(orderId,receipt){
     return await store.transaction(async()=>{
@@ -130,6 +151,8 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
         }
         return await store.get('SELECT * FROM payment_orders WHERE id=?',row.id);
       }
+      // A late WAIT callback must not reopen a cancelled attempt or erase its cancellation reason.
+      if(row.status==='closed'&&receipt.status==='WAIT_BUYER_PAY')return row;
       if(ledger||membership)throw new AlipayFailure('PAYMENT_LEDGER_INCONSISTENT');
       const now=Date.now(),proof=sha256(JSON.stringify({source:receipt.source,tradeNo:receipt.tradeNo,status:receipt.status,
         amountMinor:receipt.amountMinor,appId:receipt.appId,sellerId:receipt.sellerId,environment:receipt.environment}));
@@ -203,24 +226,32 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
     });
     routes.post('/v1/payments/orders/:id/close',{preHandler:auth,bodyLimit:1024,config:{rateLimit:{max:12,timeWindow:'1 minute'}}},async req=>{
       fields(req.body,[]);
-      let row=await own(req),failure=null;
+      let row=await own(req),failure=null,queryFailure=null,closeAttempts=0;
       if(row.status!=='closed'&&row.status!=='paid'){
         if(!validTransport(payment)||typeof payment.close!=='function')
           throw new ApiError(503,'PAYMENT_CLOSE_NOT_AVAILABLE','订单关闭服务暂不可用，请稍后重试');
         // Do not race an unfinished precreate/recovery and then mistake "not found" for a closed trade.
         if((row.status==='creating'||row.qr_code===null)&&Date.now()-row.precreate_at<RECOVERY_INTERVAL)
           throw new ApiError(409,'PAYMENT_CREATION_PENDING','原订单仍在创建，请稍后重试切换套餐');
+        closeAttempts++;
         try{row=await settleClose(row.id,await payment.close(row));}
         catch(error){
           failure=errorCode(error);
-          // A timeout, "already paid", or invalid close response is not proof of cancellation.
-          // Reconcile the original trade once, bypassing the normal display-query throttle.
-          try{row=await settle(row.id,await payment.query(row));}catch{row=await own(req);}
+          // Check for a concurrent successful payment once before ending this attempt.
+          try{row=await settle(row.id,await payment.query(row));}
+          catch(queryError){queryFailure=errorCode(queryError);row=await own(req);}
+          if(row.status!=='paid'&&row.status!=='closed'&&failure==='PAYMENT_TRADE_NOT_FOUND'&&
+            (queryFailure==='PAYMENT_TRADE_NOT_FOUND'||queryFailure===null&&row.status==='pending'))
+            row=await cancelMissingTrade(row.id);
         }
       }
       req.auth=await authenticate(store,req);row=await own(req);
+      // The attempt is ended either by provider closure or by the explicit merchant cancellation policy.
       const confirmed=row.status==='closed';
-      return {...await view(row,confirmed||row.status==='paid'?null:failure||'PAYMENT_CLOSE_UNCONFIRMED'),closeConfirmed:confirmed};
+      if(!confirmed&&row.status!=='paid')await store.audit(req.auth.user_id,'payment-order-close-pending',row.id,
+        {provider:'alipay',closeError:failure,queryError:queryFailure,attempts:closeAttempts});
+      return {...await view(row,confirmed||row.status==='paid'?null:failure||'PAYMENT_CLOSE_UNCONFIRMED'),
+        closeConfirmed:confirmed,closeAttempts,queryErrorCode:queryFailure};
     });
     routes.get('/v1/payments/orders/:id',{preHandler:auth,config:{rateLimit:{max:30,timeWindow:'1 minute'}}},async req=>{
       let row=await own(req),failure=null;
