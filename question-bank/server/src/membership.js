@@ -9,12 +9,13 @@ const offerKey=id=>PREFIX+'offer:'+sha256(id);
 const EXCHANGE_POINTS=5,EXCHANGE_UNITS=500;
 const importHoldKey=(jobId,sourceHash)=>PREFIX+'import-exchange:'+sha256(jobId+'\u0000'+sourceHash);
 export const MEMBERSHIP_PLANS=Object.freeze([
-  Object.freeze({id:'membership-go',plan:'go',title:'Go 月度会员',amountMinor:1600,points:120,aiImports:5,allowPointsExchange:true,pointsPerImportExchange:EXCHANGE_POINTS,importLimit:5000,libraryCapacity:20000,historyLimit:1500,masterEngine:true,moveArrows:true,automaticMoves:true,miniBoard:false,replay:false,cloudEngine:false}),
-  Object.freeze({id:'membership-plus',plan:'plus',title:'Plus 月度会员',amountMinor:2660,points:320,aiImports:15,allowPointsExchange:true,pointsPerImportExchange:EXCHANGE_POINTS,importLimit:10000,libraryCapacity:30000,historyLimit:3000,masterEngine:true,moveArrows:true,automaticMoves:true,miniBoard:true,replay:true,cloudEngine:false})
+  Object.freeze({id:'membership-go',plan:'go',title:'Go 永久会员',billing:'lifetime',permanent:true,lifetimeUpdates:true,amountMinor:1600,points:120,aiImports:5,allowPointsExchange:true,pointsPerImportExchange:EXCHANGE_POINTS,importLimit:5000,libraryCapacity:20000,historyLimit:1500,masterEngine:true,moveArrows:true,automaticMoves:true,miniBoard:false,replay:false,cloudEngine:false}),
+  Object.freeze({id:'membership-plus',plan:'plus',title:'Plus 永久会员',billing:'lifetime',permanent:true,lifetimeUpdates:true,amountMinor:2660,points:320,aiImports:15,allowPointsExchange:true,pointsPerImportExchange:EXCHANGE_POINTS,importLimit:10000,libraryCapacity:30000,historyLimit:3000,masterEngine:true,moveArrows:true,automaticMoves:true,miniBoard:true,replay:true,cloudEngine:false})
 ]);
 export const membershipPlan=id=>MEMBERSHIP_PLANS.find(p=>p.id===id||p.plan===id)??null;
 const base={plan:'free',allowPointsExchange:false,pointsPerImportExchange:EXCHANGE_POINTS,importLimit:3000,libraryCapacity:10000,historyLimit:500,masterEngine:false,moveArrows:true,automaticMoves:false,miniBoard:false,replay:false,cloudEngine:false};
 const count=n=>Number.isSafeInteger(n)&&n>=0&&n<=1_000_000_000;
+const rank=plan=>plan==='plus'?2:plan==='go'?1:0;
 // Subscription calendar is Asia/Shanghai (CNY billing), retaining the original day across short months.
 export function nextMembershipMonth(timestamp,anchorDay){
   const offset=8*3600000,d=new Date(timestamp+offset),y=d.getUTCFullYear(),m=d.getUTCMonth()+1;
@@ -23,7 +24,7 @@ export function nextMembershipMonth(timestamp,anchorDay){
 }
 const decode=(row,type)=>{try{const v=JSON.parse(row.result);if(v.type!==type)throw new Error();return v;}catch{throw new ApiError(500,'MEMBERSHIP_RECORD_INVALID','会员权益记录无法核实，请稍后重试');}};
 
-/** Authoritative periods and cumulative import quota. Old free/sponsor labels never grant a paid plan. */
+/** Server-owned permanent rights, legacy frozen periods and cumulative import quota. */
 export function membershipAccount(store,{clock=Date.now}={}){
   const wallet=pointWallet(store,{clock});
   const read=async(owner,key)=>store.get('SELECT * FROM confirmations WHERE owner_id=? AND idempotency_key=?',owner,key);
@@ -35,6 +36,9 @@ export function membershipAccount(store,{clock=Date.now}={}){
     const now=clock(),found=await read(owner,ACCOUNT);
     const state=found?decode(found,'membership_account_v1'):{type:'membership_account_v1',version:1,initialGranted:2,granted:2,used:0,reserved:0,periods:[],createdAt:now};
     if(![state.granted,state.used,state.reserved].every(count)||state.used+state.reserved>state.granted||!Array.isArray(state.periods))throw new ApiError(500,'MEMBERSHIP_RECORD_INVALID','导题额度记录无法核实');
+    if(state.permanent&&(!membershipPlan(state.permanent.benefits?.plan)||state.permanent.benefits.billing!=='lifetime'||
+      state.permanent.benefits.permanent!==true||!Number.isSafeInteger(state.permanent.startsAt)||state.permanent.startsAt>now))
+      throw new ApiError(500,'MEMBERSHIP_RECORD_INVALID','永久会员记录无法核实');
     if(!found)await insert(owner,ACCOUNT,ACCOUNT,state);
     for(const period of state.periods){
       if(period.startsAt>now||period.issued)continue;
@@ -49,15 +53,19 @@ export function membershipAccount(store,{clock=Date.now}={}){
     const result=await fn(state,now,user);await write(owner,ACCOUNT,state);return result;
   });
   const describe=(state,now)=>{
-    const current=state.periods.find(p=>p.startsAt<=now&&now<p.endsAt),upcoming=state.periods.filter(p=>p.startsAt>now).sort((a,b)=>a.startsAt-b.startsAt);
+    const legacy=state.periods.find(p=>p.startsAt<=now&&now<p.endsAt);
+    const permanent=state.permanent&&rank(state.permanent.benefits.plan)>=rank(legacy?.benefits.plan)?state.permanent:null;
+    const current=permanent??legacy,upcoming=permanent?[]:state.periods.filter(p=>p.startsAt>now).sort((a,b)=>a.startsAt-b.startsAt);
     // Account-wide library capacity and per-file import limit are distinct. Old paid receipts stay immutable.
     const policy=current?membershipPlan(current.benefits.plan):null;
     const benefits=current?{...base,...current.benefits,importLimit:policy?.importLimit??base.importLimit,
       libraryCapacity:policy?.libraryCapacity??base.libraryCapacity,
       moveArrows:policy?.moveArrows??base.moveArrows,automaticMoves:policy?.automaticMoves??base.automaticMoves,
       allowPointsExchange:policy?.allowPointsExchange??base.allowPointsExchange,pointsPerImportExchange:EXCHANGE_POINTS}:base;
-    return {...benefits,version:1,active:!!current,expiresAt:current?new Date(current.endsAt).toISOString():null,
-      subscriptionExpiresAt:state.periods.length?new Date(Math.max(...state.periods.map(p=>p.endsAt))).toISOString():null,
+    return {...benefits,version:2,active:!!current,billing:permanent?'lifetime':current?'monthly':null,
+      permanent:!!permanent,lifetimeUpdates:!!permanent&&permanent.benefits.lifetimeUpdates===true,
+      expiresAt:current&&!permanent?new Date(current.endsAt).toISOString():null,
+      subscriptionExpiresAt:permanent?null:state.periods.length?new Date(Math.max(...state.periods.map(p=>p.endsAt))).toISOString():null,
       nextPlan:upcoming[0]?.benefits.plan??null,nextPlanStartsAt:upcoming[0]?new Date(upcoming[0].startsAt).toISOString():null,
       aiImports:{initial:state.initialGranted,granted:state.granted,used:state.used,reserved:state.reserved,available:state.granted-state.used-state.reserved},
       cloudEngineStatus:'not_connected',billingTimezone:'Asia/Shanghai'};
@@ -78,8 +86,23 @@ export function membershipAccount(store,{clock=Date.now}={}){
     if(!plan||plan.id!==membershipPlan(planId)?.id)throw new ApiError(400,'MEMBERSHIP_PLAN_INVALID','会员等级不存在');
     const key=orderKey(orderId),digest=sha256(plan.id),prior=await read(owner,key);
     if(prior){if(prior.request_hash!==digest)throw new ApiError(409,'MEMBERSHIP_ORDER_CONFLICT','该订单已有其他会员权益');return decode(prior,'membership_order_v1');}
+    if(plan.billing==='lifetime'&&plan.permanent===true){
+      // Every paid order is delivered once, even if two previously open orders settle out of order.
+      // A lower tier can never replace permanent higher-tier rights.
+      await wallet.creditPermanent(owner,plan.points*100,'membership-once:'+orderId,
+        {reason:plan.title+'购买赠点',ledgerKey:'membership-once:'+orderId});
+      state.granted+=plan.aiImports;
+      if(!count(state.granted))throw new ApiError(422,'MEMBERSHIP_QUOTA_LIMIT','累计导题额度超出范围');
+      if(!state.permanent||rank(plan.plan)>rank(state.permanent.benefits.plan))
+        state.permanent={orderId,startsAt:now,benefits:{...plan}};
+      const receipt={type:'membership_order_v1',version:2,fulfilled:true,orderId,plan:plan.plan,billing:'lifetime',
+        permanent:true,lifetimeUpdates:plan.lifetimeUpdates===true,startsAt:new Date(now).toISOString(),endsAt:null,
+        benefits:{...plan},createdAt:now};
+      await insert(owner,key,digest,receipt);
+      await store.run('UPDATE users SET revision=revision+1 WHERE id=?',owner);
+      return receipt;
+    }
     const ordered=state.periods.filter(p=>p.endsAt>now).sort((a,b)=>a.startsAt-b.startsAt),current=ordered.find(p=>p.startsAt<=now&&now<p.endsAt);
-    const rank=p=>p==='plus'?2:p==='go'?1:0;
     let startsAt=ordered.at(-1)?.endsAt??now,anchorDay=ordered.at(-1)?.anchorDay??new Date(now+8*3600000).getUTCDate();
     if(current&&rank(plan.plan)>rank(current.benefits.plan)){
       startsAt=now;anchorDay=new Date(now+8*3600000).getUTCDate();
@@ -110,9 +133,19 @@ export function membershipAccount(store,{clock=Date.now}={}){
     if(prior){if(prior.request_hash!==digest)throw new ApiError(409,'MEMBERSHIP_ORDER_CONFLICT','订单权益快照不一致');return;}
     await insert(owner,key,digest,{type:'membership_offer_v1',version:1,benefits:{...plan}});
   };
+  const offerForOrder=async(owner,orderId)=>{
+    const found=await read(owner,offerKey(orderId));
+    return found?decode(found,'membership_offer_v1').benefits:null;
+  };
+  const assertPurchasable=(owner,plan)=>transaction(owner,state=>{
+    if(state.permanent&&rank(state.permanent.benefits.plan)>=rank(plan.plan))
+      throw new ApiError(409,'MEMBERSHIP_ALREADY_OWNED','已拥有该等级或更高等级的永久会员，无需重复购买');
+  });
   const orderReceipt=async(owner,orderId)=>{
     const found=await read(owner,orderKey(orderId));if(!found)return null;
     const original=decode(found,'membership_order_v1');
+    if(original.billing==='lifetime'&&original.permanent===true)
+      return {...original,effectiveStartsAt:original.startsAt,effectiveEndsAt:null,activation:'active'};
     return transaction(owner,(state,now)=>{
       const period=state.periods.find(p=>p.orderId===orderId);
       return {...original,effectiveStartsAt:period?new Date(period.startsAt).toISOString():original.startsAt,
@@ -136,9 +169,9 @@ export function membershipAccount(store,{clock=Date.now}={}){
     if(prior){const v=readTicket(prior);if(v.sourceHash!==sourceHash)throw new ApiError(409,'AI_IMPORT_JOB_CONFLICT','导题任务已绑定其他文件');return v;}
     const membership=describe(state,now);let funding='quota';
     if(state.granted-state.used-state.reserved<1){
-      if(!allowPointsExchange)throw new ApiError(403,'AI_IMPORT_QUOTA_REQUIRED','AI导题可用次数已用完或已被其他任务预留；可开通或续费会员补充次数');
+      if(!allowPointsExchange)throw new ApiError(403,'AI_IMPORT_QUOTA_REQUIRED','AI导题可用次数已用完或已被其他任务预留；Go或Plus会员可允许点数兑换次数');
       if(!membership.active||!['go','plus'].includes(membership.plan)||!membership.allowPointsExchange)
-        throw new ApiError(403,'AI_IMPORT_EXCHANGE_UNAVAILABLE','仅有效Go或Plus订阅可在次数用尽时允许点数兑换次数');
+        throw new ApiError(403,'AI_IMPORT_EXCHANGE_UNAVAILABLE','仅有效Go或Plus会员可在次数用尽时允许点数兑换次数');
       try {await wallet.reserve(owner,importHoldKey(jobId,sourceHash),EXCHANGE_UNITS,sha256(JSON.stringify({jobId,sourceHash,points:EXCHANGE_POINTS})));}
       catch(error){if(error instanceof ApiError&&error.code==='POINTS_REQUIRED')throw new ApiError(402,'AI_IMPORT_EXCHANGE_POINTS_REQUIRED','可用点数不足5点，未兑换导题次数');throw error;}
       funding='points';
@@ -186,12 +219,12 @@ export function membershipAccount(store,{clock=Date.now}={}){
     const ticket=readTicket(found);
     if(ticket.sourceHash!==sourceHash||!['reserved','consumed'].includes(ticket.state))throw new ApiError(403,'AI_IMPORT_TICKET_INVALID','本次文件的导题授权无效');return ticket;
   };
-  return {snapshot,quota,fulfill,freezeOffer,orderReceipt,startImport,finishImport,requireImport};
+  return {snapshot,quota,fulfill,freezeOffer,offerForOrder,assertPurchasable,orderReceipt,startImport,finishImport,requireImport};
 }
 
 export async function membershipRoutes(app,{store,auth}){
   const members=membershipAccount(store);
-  app.get('/v1/memberships/catalog',{preHandler:auth},async()=>({version:1,currency:'CNY',items:MEMBERSHIP_PLANS,cloudEngineStatus:'not_connected'}));
+  app.get('/v1/memberships/catalog',{preHandler:auth},async()=>({version:2,billing:'lifetime',currency:'CNY',items:MEMBERSHIP_PLANS,cloudEngineStatus:'not_connected'}));
   app.get('/v1/memberships/ai-imports/quota',{preHandler:auth},req=>members.quota(req.auth.user_id));
   app.post('/v1/memberships/ai-imports/:id/start',{preHandler:auth,bodyLimit:1024},async req=>{
     fields(req.body,['sourceHash','allowPointsExchange']);

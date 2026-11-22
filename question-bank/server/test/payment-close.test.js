@@ -28,7 +28,7 @@ async function fixture(t){
       environment:payment.environment,appId:payment.appId,sellerId:payment.sellerId,status,source,paid:status==='TRADE_SUCCESS'};
   }
   const app=await testApp({paymentTransport:payment});t.after(()=>app.close());const user=await register(app,'synthetic-close');
-  const create=async(product,key=product)=>{const r=await call(app,'POST','/v1/payments/orders',user.accessToken,{packageId:product},key);assert.equal(r.statusCode,200,r.body);return r.json();};
+  const create=async(product,key=product)=>{const r=await call(app,'POST','/v1/payments/orders',user.accessToken,{packageId:product,...(product.startsWith('membership-')?{membershipBilling:'lifetime'}:{})},key);assert.equal(r.statusCode,200,r.body);return r.json();};
   const close=order=>call(app,'POST','/v1/payments/orders/'+order.orderId+'/close',user.accessToken,{});
   const notify=order=>app.inject({method:'POST',url:'/v1/payments/alipay/notify',headers:{'content-type':'application/x-www-form-urlencoded'},payload:'out_trade_no='+order.orderId+'&sign=synthetic'});
   return {app,user,state,create,close,notify};

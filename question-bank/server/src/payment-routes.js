@@ -51,11 +51,13 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
     await members.snapshot(row.owner_id);
     const user=await pointWallet(store).user(row.owner_id),plan=membershipPlan(row.package_id);
     const membership=plan?await members.orderReceipt(row.owner_id,row.id):null;
+    const offer=plan?await members.offerForOrder(row.owner_id,row.id):null;
     const merchantCancelled=row.status==='closed'&&row.error_code===CANCELLED_MISSING_TRADE;
     if(!user)absent();
     return {orderId:row.id,status:row.status,packageId:row.package_id,title:row.package_title,
       amountMinor:row.amount_minor,priceCents:row.amount_minor,amount:amountString(row.amount_minor),currency:'CNY',points:row.points,
-      productType:plan?'membership':'points',fulfilled:row.status==='paid'&&(!plan||membership?.fulfilled===true),membership,
+      productType:plan?'membership':'points',membershipBilling:plan?(offer?.billing??'monthly'):null,
+      fulfilled:row.status==='paid'&&(!plan||membership?.fulfilled===true),membership,
       credited:row.status==='paid',pointsCredited:row.status==='paid'&&(!plan||Date.parse(membership?.startsAt)<=row.paid_at)?row.points:0,pointsBalance:user.points_balance,
       pointsAvailable:availablePoints(user),
       qrCode:row.status==='pending'&&row.expires_at>Date.now()?row.qr_code:null,
@@ -185,15 +187,18 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
       environment:payment?.environment||null,items:POINTS_PACKAGES.map(item=>({...item,label:item.title,priceCents:item.amountMinor,
         amount:amountString(item.amountMinor),bonusPercent:Math.round((item.points*990/(item.amountMinor*100)-1)*100000)/1000}))}));
     routes.post('/v1/payments/orders',{preHandler:auth,bodyLimit:1024,config:{rateLimit:{max:6,timeWindow:'1 minute'}}},async req=>{
-      fields(req.body,['packageId']);const packageId=text(req.body.packageId,'套餐',1,64);
+      fields(req.body,['packageId','membershipBilling']);const packageId=text(req.body.packageId,'套餐',1,64);
       const chosen=[...POINTS_PACKAGES,...MEMBERSHIP_PLANS].find(item=>item.id===packageId);
       if(!chosen)throw new ApiError(400,'PAYMENT_PACKAGE_NOT_FOUND','套餐不存在');
+      if(membershipPlan(chosen.id)&&req.body.membershipBilling!=='lifetime')
+        throw new ApiError(409,'MEMBERSHIP_CLIENT_UPDATE_REQUIRED','会员已改为一次购买永久有效，请更新App后开通');
       const idempotencyHash=sha256(text(req.headers['idempotency-key'],'Idempotency-Key',1,128)),requestHash=sha256(JSON.stringify({packageId}));
       const begin=await store.transaction(async()=>{
         req.auth=await authenticate(store,req);
         const previous=await store.get('SELECT * FROM payment_orders WHERE owner_id=? AND idempotency_hash=?',req.auth.user_id,idempotencyHash);
         if(previous){if(previous.request_hash!==requestHash)throw new ApiError(409,'IDEMPOTENCY_CONFLICT','幂等键已用于其他套餐');return {row:previous,replay:true};}
         if(!validTransport(payment))unavailable(payment);
+        if(membershipPlan(chosen.id))await members.assertPurchasable(req.auth.user_id,chosen);
         const unresolved=await store.get("SELECT id FROM payment_orders WHERE owner_id=? AND status IN ('creating','uncertain') ORDER BY created_at LIMIT 1",req.auth.user_id);
         if(unresolved)throw new ApiError(409,'PAYMENT_CONFIRMATION_PENDING','已有订单待确认，请先查看原订单结果');
         const open=await store.get("SELECT COUNT(*) AS n FROM payment_orders WHERE owner_id=? AND status IN ('creating','pending','uncertain') AND expires_at>?",req.auth.user_id,Date.now());

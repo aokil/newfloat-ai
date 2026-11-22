@@ -4,12 +4,13 @@ import {AsyncSqliteStore} from '../src/async-store.js';
 import {membershipAccount,membershipPlan} from '../src/membership.js';
 import {pointWallet} from '../src/point-wallet.js';
 import {testApp,register,call} from './helpers.js';
+import {legacyMembershipAccount} from './membership-legacy-fixture.js';
 
 const source='a'.repeat(64),job=n=>n.toString(16).padStart(8,'0')+'-1111-4111-8111-111111111111';
 async function fixture(t,plan='go'){
   const store=await AsyncSqliteStore.open(':memory:');t.after(()=>store.close());let now=Date.parse('2026-01-31T04:30:00Z');
   await store.run("INSERT INTO users(id,username,display_name,password_hash,role,created_at,points_balance) VALUES('u','exchange-fixture','fixture','not-a-password','user',0,20)");
-  const options={clock:()=>now},members=membershipAccount(store,options),wallet=pointWallet(store,options);
+  const options={clock:()=>now},members=legacyMembershipAccount(store,options),wallet=pointWallet(store,options);
   const period=plan==='free'?null:await members.fulfill('u','synthetic-'+plan,plan);
   return {store,members,wallet,period,options,time:value=>{now=value;}};
 }

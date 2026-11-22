@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {AsyncSqliteStore} from '../src/async-store.js';
-import {membershipAccount,nextMembershipMonth,membershipPlan} from '../src/membership.js';
+import {nextMembershipMonth,membershipPlan} from '../src/membership.js';
 import {pointWallet} from '../src/point-wallet.js';
+import {legacyMembershipAccount} from './membership-legacy-fixture.js';
 const JAN31=Date.parse('2026-01-31T12:30:00+08:00'),job='11111111-1111-4111-8111-111111111111',source='a'.repeat(64);
 async function fixture(t){
   const store=await AsyncSqliteStore.open(':memory:');t.after(()=>store.close());let now=JAN31;
   await store.run("INSERT INTO users(id,username,display_name,password_hash,role,created_at,membership,points_balance) VALUES('u','u','Synthetic','x','user',0,'sponsor',100)");
-  return {store,m:membershipAccount(store,{clock:()=>now}),w:pointWallet(store,{clock:()=>now}),setTime:n=>now=n};
+  return {store,m:legacyMembershipAccount(store,{clock:()=>now}),w:pointWallet(store,{clock:()=>now}),setTime:n=>now=n};
 }
 test('new and existing sponsor accounts receive two cumulative imports once, without a paid upgrade',async t=>{
   const f=await fixture(t);for(let i=0;i<3;i++){const s=await f.m.snapshot('u');assert.equal(s.plan,'free');assert.equal(s.importLimit,3000);assert.equal(s.libraryCapacity,10000);assert.equal(s.aiImports.available,2);assert.equal(s.historyLimit,500);}

@@ -11,7 +11,7 @@ async function fixture(t){
   function receipt(row,source){return {verified:true,orderId:row.id,amountMinor:row.amount_minor+state.amountOffset,environment:'sandbox',appId:payment.appId,sellerId:payment.sellerId,
     tradeNo:state.trade??'trade_'+row.id,status:'TRADE_SUCCESS',source,paid:true};}
   const app=await testApp({paymentTransport:payment});t.after(()=>app.close());const user=await register(app,'synthetic-member');
-  const create=async(product,key=product)=>{const r=await call(app,'POST','/v1/payments/orders',user.accessToken,{packageId:product},key);assert.equal(r.statusCode,200,r.body);return r.json();};
+  const create=async(product,key=product)=>{const r=await call(app,'POST','/v1/payments/orders',user.accessToken,{packageId:product,...(product.startsWith('membership-')?{membershipBilling:'lifetime'}:{})},key);assert.equal(r.statusCode,200,r.body);return r.json();};
   const notify=order=>app.inject({method:'POST',url:'/v1/payments/alipay/notify',headers:{'content-type':'application/x-www-form-urlencoded'},payload:'out_trade_no='+order.orderId+'&sign=synthetic'});
   const me=async()=>{const r=await call(app,'GET','/v1/me',user.accessToken);assert.equal(r.statusCode,200,r.body);return r.json().account;};
   return {app,user,state,create,notify,me};
@@ -22,23 +22,38 @@ test('member catalogue is separate from permanent point packages and advertises 
   assert.deepEqual(m.items.map(i=>[i.plan,i.importLimit,i.libraryCapacity]),[['go',5000,20000],['plus',10000,30000]]);
   assert(m.items.every(i=>i.moveArrows===true&&i.automaticMoves===true));
   assert(m.items.every(i=>i.allowPointsExchange===true&&i.pointsPerImportExchange===5));
+  assert.equal(m.version,2);assert.equal(m.billing,'lifetime');
+  assert(m.items.every(i=>i.billing==='lifetime'&&i.permanent===true&&i.lifetimeUpdates===true));
 });
-test('Go callback retries fulfill membership, monthly gift and cumulative quota exactly once',async t=>{
+test('Go callback retries fulfill permanent membership and purchase gifts exactly once',async t=>{
   const f=await fixture(t),order=await f.create('membership-go');assert.equal(order.productType,'membership');assert.equal(order.amountMinor,1600);
   assert.equal((await f.notify(order)).body,'success');assert.equal((await f.notify(order)).body,'success');
-  const a=await f.me();assert.equal(a.membership,'go');assert.equal(a.membershipBenefits.aiImports.granted,7);assert.equal(a.wallet.monthlyAvailable,120);assert.equal(a.wallet.permanentAvailable,10);
+  const a=await f.me();assert.equal(a.membership,'go');assert.equal(a.membershipBenefits.aiImports.granted,7);assert.equal(a.wallet.monthlyAvailable,0);assert.equal(a.wallet.permanentAvailable,130);
+  assert.equal(a.membershipBenefits.permanent,true);assert.equal(a.membershipBenefits.expiresAt,null);
+  assert(Date.parse(a.membershipBenefits.validUntil)<=Date.now()+7*86400000+1000);
   const result=(await call(f.app,'GET','/v1/payments/orders/'+order.orderId,f.user.accessToken)).json();assert.equal(result.fulfilled,true);assert.equal(result.membership.plan,'go');assert.equal(result.membership.activation,'active');
-  assert.equal((await f.app.store.get("SELECT COUNT(*) AS n FROM points_ledger WHERE user_id=? AND reason LIKE '%月赠点'",f.user.principal.userId)).n,1);
+  assert.equal(result.membershipBilling,'lifetime');assert.equal(result.membership.endsAt,null);
+  assert.equal((await f.app.store.get("SELECT COUNT(*) AS n FROM points_ledger WHERE user_id=? AND reason LIKE '%购买赠点'",f.user.principal.userId)).n,1);
 });
-test('Plus purchase upgrades an active Go immediately and retains the paused Go rights',async t=>{
+test('Plus purchase permanently upgrades Go immediately and preserves its previously granted gifts',async t=>{
   const f=await fixture(t),go=await f.create('membership-go');await f.notify(go);const plus=await f.create('membership-plus');await f.notify(plus);
-  const a=await f.me();assert.equal(a.membership,'plus');assert.equal(a.membershipBenefits.nextPlan,'go');assert.equal(a.membershipBenefits.aiImports.granted,22);assert.equal(a.wallet.monthlyAvailable,440);
+  const a=await f.me();assert.equal(a.membership,'plus');assert.equal(a.membershipBenefits.nextPlan,null);assert.equal(a.membershipBenefits.aiImports.granted,22);assert.equal(a.wallet.permanentAvailable,450);
   await f.notify(plus);assert.equal((await f.me()).membershipBenefits.aiImports.granted,22);
 });
-test('Go purchased during Plus is fulfilled as a future period without prematurely granting its gifts',async t=>{
-  const f=await fixture(t),plus=await f.create('membership-plus');await f.notify(plus);const go=await f.create('membership-go');await f.notify(go);
-  const result=(await call(f.app,'GET','/v1/payments/orders/'+go.orderId,f.user.accessToken)).json();assert.equal(result.fulfilled,true);assert.equal(result.pointsCredited,0);assert.equal(result.membership.activation,'scheduled');
-  const a=await f.me();assert.equal(a.membership,'plus');assert.equal(a.membershipBenefits.aiImports.granted,17);assert.equal(a.wallet.monthlyAvailable,320);
+test('same or lower permanent membership cannot create another chargeable order',async t=>{
+  const f=await fixture(t),plus=await f.create('membership-plus');await f.notify(plus);
+  for(const product of ['membership-go','membership-plus']){
+    const result=await call(f.app,'POST','/v1/payments/orders',f.user.accessToken,{packageId:product,membershipBilling:'lifetime'},'repeat-'+product);
+    assert.equal(result.statusCode,409);assert.equal(result.json().error.code,'MEMBERSHIP_ALREADY_OWNED');
+  }
+  assert.equal((await f.create('membership-plus')).orderId,plus.orderId);
+  const a=await f.me();assert.equal(a.membership,'plus');assert.equal(a.membershipBenefits.aiImports.granted,17);assert.equal(a.wallet.permanentAvailable,330);
+});
+test('old clients cannot create a permanent order while still showing monthly purchase terms',async t=>{
+  const f=await fixture(t);
+  const old=await call(f.app,'POST','/v1/payments/orders',f.user.accessToken,{packageId:'membership-go'},'old-client');
+  assert.equal(old.statusCode,409);assert.equal(old.json().error.code,'MEMBERSHIP_CLIENT_UPDATE_REQUIRED');
+  assert.equal((await f.app.store.get('SELECT COUNT(*) n FROM payment_orders')).n,0);
 });
 test('wrong amounts and reused provider trades cannot create membership entitlements',async t=>{
   const f=await fixture(t),go=await f.create('membership-go');f.state.amountOffset=1;assert.equal((await f.notify(go)).body,'failure');assert.equal((await f.me()).membership,'free');
@@ -47,7 +62,7 @@ test('wrong amounts and reused provider trades cannot create membership entitlem
 test('permanent point purchases and order idempotency continue to work independently of membership',async t=>{
   const f=await fixture(t),order=await f.create('points-100','same');assert.equal((await f.create('points-100','same')).orderId,order.orderId);
   assert.equal((await f.notify(order)).body,'success');await f.notify(order);const a=await f.me();assert.equal(a.wallet.permanentAvailable,110);assert.equal(a.wallet.monthlyAvailable,0);assert.equal(a.membership,'free');
-  assert.equal((await call(f.app,'POST','/v1/payments/orders',f.user.accessToken,{packageId:'membership-go'},'same')).statusCode,409);
+  assert.equal((await call(f.app,'POST','/v1/payments/orders',f.user.accessToken,{packageId:'membership-go',membershipBilling:'lifetime'},'same')).statusCode,409);
 });
 test('zero balance accounts can reserve initial AI imports, while unauthorised repair is rejected',async t=>{
   const f=await fixture(t);const {setPointsBalance}=await import('./helpers.js');await setPointsBalance(f.app.store,f.user.principal.userId,0);
