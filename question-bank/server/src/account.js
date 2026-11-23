@@ -2,26 +2,30 @@ import {ApiError,id} from './security.js';
 import {MODEL_CATALOG,configuredCatalog,modelUnavailableReason} from './model-catalog.js';
 import {pointUnits,pointValue,availablePoints,availablePointUnits,MAX_POINT_VALUE} from './point-values.js';
 import {pointWallet} from './point-wallet.js';
-import {membershipAccount} from './membership.js';
+import {AI_IMPORT_POINTS,membershipAccount} from './membership.js';
+import {POINTS_PACKAGES,pointsCardStyle} from './alipay.js';
 export async function accountInfo(store,user,sessionExpires=Number.MAX_SAFE_INTEGER,now=Date.now()) {
   const membership=await membershipAccount(store).snapshot(user.id);
   user=await pointWallet(store).user(user.id);
   const available=availablePoints(user);
-  const allowed=!user.disabled&&(available>0||membership.active);
+  const allowed=!user.disabled&&available>0;
   const until=allowed?Math.min(now+900000,sessionExpires):now;
   const bindings=await configuredCatalog(store),model=MODEL_CATALOG.some(item=>!modelUnavailableReason(item,bindings.get(item.key))&&item.pointsPerCall<=available);
-  return {displayName:user.display_name,avatarId:user.avatar_id??null,membership:membership.plan,membershipExpiresAt:membership.expiresAt,
+  const packageIds=POINTS_PACKAGES.map(item=>item.id);
+  const highest=await store.get(`SELECT amount_minor FROM payment_orders WHERE owner_id=? AND status='paid' AND package_id IN (${packageIds.map(()=>'?').join(',')}) ORDER BY amount_minor DESC LIMIT 1`,user.id,...packageIds);
+  return {displayName:user.display_name,avatarId:user.avatar_id??null,pointsCardStyle:pointsCardStyle(highest?.amount_minor),
+    membership:membership.plan,membershipExpiresAt:null,
     membershipBenefits:{...membership,validUntil:new Date(Math.min(now+7*86400000,sessionExpires,membership.expiresAt?Date.parse(membership.expiresAt):Number.MAX_SAFE_INTEGER)).toISOString()},
     trialStartedAt:new Date(user.trial_started).toISOString(),trialEndsAt:new Date(user.trial_ends).toISOString(),
     pointsBalance:user.points_balance,pointsReserved:user.points_reserved,pointsAvailable:available,revision:user.revision,wallet:await pointWallet(store).snapshot(user.id),
-    entitlements:{floatingAllowed:allowed,importAllowed:allowed,aiImportAllowed:!user.disabled&&membership.aiImports.available>0,
+    entitlements:{floatingAllowed:allowed,importAllowed:allowed,aiImportAllowed:!user.disabled&&availablePointUnits(user)>=AI_IMPORT_POINTS*100,
       aiAllowed:!user.disabled&&available>0,byokAllowed:!user.disabled&&available>0,builtinAiAllowed:!user.disabled&&available>0&&model,
-      reason:user.disabled?'disabled':membership.active?'membership_active':available>0?'points_positive':'points_empty',validUntil:new Date(until).toISOString()}};
+      reason:user.disabled?'disabled':available>0?'points_positive':'points_empty',validUntil:new Date(until).toISOString()}};
 }
 export async function requireImportAccess(store,userId){
   const membership=await membershipAccount(store).snapshot(userId),user=await pointWallet(store).user(userId);
   if(user.disabled)throw new ApiError(403,'ACCOUNT_DISABLED','账号不可用');
-  if(!membership.active&&availablePointUnits(user)<=0)throw new ApiError(403,'POINTS_REQUIRED','请补充点数或开通会员后导入题库');
+  if(availablePointUnits(user)<=0)throw new ApiError(403,'POINTS_REQUIRED','请补充点数后导入题库');
   return {user,membership};
 }
 export async function requirePositivePoints(store,userId){

@@ -14,11 +14,11 @@ test('parser restores original 10000 per-file ceiling independent of libraryCapa
   assert.equal(result.items.flatMap(row=>row.errors).length,0);
   await assert.rejects(parseFile('synthetic-over-quota.tsv',table(maximum+1)),error=>error.code==='VALIDATION_FAILED'&&error.message.includes('10000'));
 });
-test('new cloud previews enforce free/go/plus file limits separately from aggregate capacity',async t=>{
+test('cloud previews use the original limits across legacy account records',async t=>{
   const app=await testApp();t.after(()=>app.close());const user=await register(app,'limits');
   const upload=async(count,key)=>{const boundary='limit-fixture';return app.inject({method:'POST',url:'/v1/imports',headers:{...auth(user.accessToken),'idempotency-key':key,'content-type':`multipart/form-data; boundary=${boundary}`},
     payload:Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="synthetic.tsv"\r\nContent-Type: text/tab-separated-values\r\n\r\n`),table(count),Buffer.from(`\r\n--${boundary}--\r\n`)])});};
-  for(const [plan,limit,capacity]of [['free',3000,10000],['go',5000,20000],['plus',10000,30000]]){
+  for(const [plan,limit,capacity]of [['free',3000,10000],['go',3000,10000],['plus',3000,10000]]){
     if(plan!=='free')await membershipAccount(app.store).fulfill(user.principal.userId,'synthetic-'+plan,plan);
     const account=(await call(app,'GET','/v1/me',user.accessToken)).json().account;assert.equal(account.membershipBenefits.importLimit,limit);assert.equal(account.membershipBenefits.libraryCapacity,capacity);
     const valid=await upload(limit,plan+'-ok');assert.equal(valid.statusCode,202);assert.equal(valid.json().status,'ready');

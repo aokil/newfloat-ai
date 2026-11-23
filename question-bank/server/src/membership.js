@@ -6,14 +6,16 @@ const hash=v=>createHash('sha256').update(v).digest('hex');
 const PREFIX='membership_internal_v1:'+hash('membership-records')+':'+hash('membership-accounts')+':';
 const ACCOUNT=PREFIX+'account',orderKey=id=>PREFIX+'order:'+sha256(id),jobKey=id=>PREFIX+'import:'+sha256(id);
 const offerKey=id=>PREFIX+'offer:'+sha256(id);
-const EXCHANGE_POINTS=5,EXCHANGE_UNITS=500;
+const EXCHANGE_POINTS=5;
+export const AI_IMPORT_POINTS=10;
 const importHoldKey=(jobId,sourceHash)=>PREFIX+'import-exchange:'+sha256(jobId+'\u0000'+sourceHash);
 export const MEMBERSHIP_PLANS=Object.freeze([
   Object.freeze({id:'membership-go',plan:'go',title:'Go 永久会员',billing:'lifetime',permanent:true,lifetimeUpdates:true,amountMinor:1600,points:120,aiImports:5,allowPointsExchange:true,pointsPerImportExchange:EXCHANGE_POINTS,importLimit:5000,libraryCapacity:20000,historyLimit:1500,masterEngine:true,moveArrows:true,automaticMoves:true,miniBoard:false,replay:false,cloudEngine:false}),
   Object.freeze({id:'membership-plus',plan:'plus',title:'Plus 永久会员',billing:'lifetime',permanent:true,lifetimeUpdates:true,amountMinor:2660,points:320,aiImports:15,allowPointsExchange:true,pointsPerImportExchange:EXCHANGE_POINTS,importLimit:10000,libraryCapacity:30000,historyLimit:3000,masterEngine:true,moveArrows:true,automaticMoves:true,miniBoard:true,replay:true,cloudEngine:false})
 ]);
 export const membershipPlan=id=>MEMBERSHIP_PLANS.find(p=>p.id===id||p.plan===id)??null;
-const base={plan:'free',allowPointsExchange:false,pointsPerImportExchange:EXCHANGE_POINTS,importLimit:3000,libraryCapacity:10000,historyLimit:500,masterEngine:false,moveArrows:true,automaticMoves:false,miniBoard:false,replay:false,cloudEngine:false};
+const base=Object.freeze({plan:'free',active:false,expiresAt:null,importLimit:3000,libraryCapacity:10000,historyLimit:500,masterEngine:false,moveArrows:true,automaticMoves:false,miniBoard:false,replay:false,cloudEngine:false});
+const retiredQuota=Object.freeze({initial:0,granted:0,used:0,reserved:0,available:0});
 const count=n=>Number.isSafeInteger(n)&&n>=0&&n<=1_000_000_000;
 const rank=plan=>plan==='plus'?2:plan==='go'?1:0;
 // Subscription calendar is Asia/Shanghai (CNY billing), retaining the original day across short months.
@@ -24,7 +26,7 @@ export function nextMembershipMonth(timestamp,anchorDay){
 }
 const decode=(row,type)=>{try{const v=JSON.parse(row.result);if(v.type!==type)throw new Error();return v;}catch{throw new ApiError(500,'MEMBERSHIP_RECORD_INVALID','会员权益记录无法核实，请稍后重试');}};
 
-/** Server-owned permanent rights, legacy frozen periods and cumulative import quota. */
+/** Existing order fulfillment and file tickets. New file tickets reserve points only. */
 export function membershipAccount(store,{clock=Date.now}={}){
   const wallet=pointWallet(store,{clock});
   const read=async(owner,key)=>store.get('SELECT * FROM confirmations WHERE owner_id=? AND idempotency_key=?',owner,key);
@@ -34,7 +36,7 @@ export function membershipAccount(store,{clock=Date.now}={}){
     const user=await store.get('SELECT * FROM users WHERE id=?'+(store.kind==='postgres'?' FOR UPDATE':''),owner);
     if(!user)throw new ApiError(403,'ACCOUNT_DISABLED','账号不可用');
     const now=clock(),found=await read(owner,ACCOUNT);
-    const state=found?decode(found,'membership_account_v1'):{type:'membership_account_v1',version:1,initialGranted:2,granted:2,used:0,reserved:0,periods:[],createdAt:now};
+    const state=found?decode(found,'membership_account_v1'):{type:'membership_account_v1',version:1,initialGranted:0,granted:0,used:0,reserved:0,periods:[],createdAt:now};
     if(![state.granted,state.used,state.reserved].every(count)||state.used+state.reserved>state.granted||!Array.isArray(state.periods))throw new ApiError(500,'MEMBERSHIP_RECORD_INVALID','导题额度记录无法核实');
     if(state.permanent&&(!membershipPlan(state.permanent.benefits?.plan)||state.permanent.benefits.billing!=='lifetime'||
       state.permanent.benefits.permanent!==true||!Number.isSafeInteger(state.permanent.startsAt)||state.permanent.startsAt>now))
@@ -52,32 +54,12 @@ export function membershipAccount(store,{clock=Date.now}={}){
     state.periods=state.periods.filter(p=>!p.issued||p.endsAt>now);
     const result=await fn(state,now,user);await write(owner,ACCOUNT,state);return result;
   });
-  const describe=(state,now)=>{
-    const legacy=state.periods.find(p=>p.startsAt<=now&&now<p.endsAt);
-    const permanent=state.permanent&&rank(state.permanent.benefits.plan)>=rank(legacy?.benefits.plan)?state.permanent:null;
-    const current=permanent??legacy,upcoming=permanent?[]:state.periods.filter(p=>p.startsAt>now).sort((a,b)=>a.startsAt-b.startsAt);
-    // Account-wide library capacity and per-file import limit are distinct. Old paid receipts stay immutable.
-    const policy=current?membershipPlan(current.benefits.plan):null;
-    const benefits=current?{...base,...current.benefits,importLimit:policy?.importLimit??base.importLimit,
-      libraryCapacity:policy?.libraryCapacity??base.libraryCapacity,
-      moveArrows:policy?.moveArrows??base.moveArrows,automaticMoves:policy?.automaticMoves??base.automaticMoves,
-      allowPointsExchange:policy?.allowPointsExchange??base.allowPointsExchange,pointsPerImportExchange:EXCHANGE_POINTS}:base;
-    return {...benefits,version:2,active:!!current,billing:permanent?'lifetime':current?'monthly':null,
-      permanent:!!permanent,lifetimeUpdates:!!permanent&&permanent.benefits.lifetimeUpdates===true,
-      expiresAt:current&&!permanent?new Date(current.endsAt).toISOString():null,
-      subscriptionExpiresAt:permanent?null:state.periods.length?new Date(Math.max(...state.periods.map(p=>p.endsAt))).toISOString():null,
-      nextPlan:upcoming[0]?.benefits.plan??null,nextPlanStartsAt:upcoming[0]?new Date(upcoming[0].startsAt).toISOString():null,
-      aiImports:{initial:state.initialGranted,granted:state.granted,used:state.used,reserved:state.reserved,available:state.granted-state.used-state.reserved},
-      cloudEngineStatus:'not_connected',billingTimezone:'Asia/Shanghai'};
-  };
-  const snapshot=owner=>transaction(owner,(state,now)=>describe(state,now));
-  const quota=owner=>transaction(owner,async(state,now,user)=>{
+  const snapshot=owner=>transaction(owner,()=>({...base,version:3,aiImports:retiredQuota}));
+  const quota=owner=>transaction(owner,async(_state,_now,user)=>{
     if(user.disabled)throw new ApiError(403,'ACCOUNT_DISABLED','账号不可用');
-    const membership=describe(state,now),balance=await wallet.snapshot(owner);
-    const subscriptionActive=membership.active&&['go','plus'].includes(membership.plan);
-    // A quota read carries no account/offline-validUntil and cannot extend a client permission lease.
-    return {aiImports:membership.aiImports,pointsAvailable:balance.pointsAvailable,subscriptionActive,plan:membership.plan,
-      exchangePolicy:{allowed:subscriptionActive&&membership.allowPointsExchange,pointsPerImport:EXCHANGE_POINTS,defaultEnabled:true}};
+    const balance=await wallet.snapshot(owner);
+    return {aiImports:retiredQuota,pointsAvailable:balance.pointsAvailable,pointsPerImport:AI_IMPORT_POINTS,
+      subscriptionActive:false,plan:'free',exchangePolicy:{allowed:false}};
   });
   const fulfill=async(owner,orderId,planId)=>transaction(owner,async(state,now,user)=>{
     if(user.disabled)throw new ApiError(403,'ACCOUNT_DISABLED','账号不可用');
@@ -155,30 +137,23 @@ export function membershipAccount(store,{clock=Date.now}={}){
   };
   const readTicket=found=>{
     const ticket=decode(found,'membership_import_v1'),funding=ticket.funding??'quota';
-    if(!['quota','points'].includes(funding)||funding==='points'&&ticket.pointsCost!==EXCHANGE_POINTS)
+    if(!['quota','points'].includes(funding)||funding==='points'&&![EXCHANGE_POINTS,AI_IMPORT_POINTS].includes(ticket.pointsCost))
       throw new ApiError(500,'MEMBERSHIP_RECORD_INVALID','导题资金来源记录无法核实');
-    return {...ticket,funding,pointsCost:funding==='points'?EXCHANGE_POINTS:0,
-      pointsCharged:funding==='points'&&ticket.state==='consumed'?EXCHANGE_POINTS:0,
-      pointsReserved:funding==='points'&&ticket.state==='reserved'?EXCHANGE_POINTS:0};
+    const pointsCost=funding==='points'?ticket.pointsCost:0;
+    return {...ticket,funding,pointsCost,pointsCharged:ticket.state==='consumed'?pointsCost:0,
+      pointsReserved:ticket.state==='reserved'?pointsCost:0};
   };
-  const startImport=async(owner,jobId,sourceHash,allowPointsExchange=false)=>transaction(owner,async(state,now,user)=>{
+  const startImport=async(owner,jobId,sourceHash,acceptedPointsCost)=>transaction(owner,async(_state,now,user)=>{
     if(user.disabled)throw new ApiError(403,'ACCOUNT_DISABLED','账号不可用');
     if(typeof jobId!=='string'||!/^[a-f0-9-]{36}$/u.test(jobId)||typeof sourceHash!=='string'||!/^[a-f0-9]{64}$/u.test(sourceHash))throw new ApiError(400,'AI_IMPORT_JOB_INVALID','导题任务标识无效');
-    if(typeof allowPointsExchange!=='boolean')throw new ApiError(400,'INVALID_REQUEST','allowPointsExchange必须为布尔值');
     const key=jobKey(jobId),prior=await read(owner,key);
     if(prior){const v=readTicket(prior);if(v.sourceHash!==sourceHash)throw new ApiError(409,'AI_IMPORT_JOB_CONFLICT','导题任务已绑定其他文件');return v;}
-    const membership=describe(state,now);let funding='quota';
-    if(state.granted-state.used-state.reserved<1){
-      if(!allowPointsExchange)throw new ApiError(403,'AI_IMPORT_QUOTA_REQUIRED','AI导题可用次数已用完或已被其他任务预留；Go或Plus会员可允许点数兑换次数');
-      if(!membership.active||!['go','plus'].includes(membership.plan)||!membership.allowPointsExchange)
-        throw new ApiError(403,'AI_IMPORT_EXCHANGE_UNAVAILABLE','仅有效Go或Plus会员可在次数用尽时允许点数兑换次数');
-      try {await wallet.reserve(owner,importHoldKey(jobId,sourceHash),EXCHANGE_UNITS,sha256(JSON.stringify({jobId,sourceHash,points:EXCHANGE_POINTS})));}
-      catch(error){if(error instanceof ApiError&&error.code==='POINTS_REQUIRED')throw new ApiError(402,'AI_IMPORT_EXCHANGE_POINTS_REQUIRED','可用点数不足5点，未兑换导题次数');throw error;}
-      funding='points';
-    }
-    const ticket={type:'membership_import_v1',jobId,sourceHash,state:'reserved',questionLimit:membership.importLimit,createdAt:now,
-      funding,pointsCost:funding==='points'?EXCHANGE_POINTS:0,allowPointsExchange};
-    if(funding==='quota')state.reserved++;
+    if(acceptedPointsCost!==AI_IMPORT_POINTS)
+      throw new ApiError(409,'AI_IMPORT_PRICE_CONFIRMATION_REQUIRED','请更新App后使用10点一次的AI导入');
+    try {await wallet.reserve(owner,importHoldKey(jobId,sourceHash),AI_IMPORT_POINTS*100,sha256(JSON.stringify({jobId,sourceHash,points:AI_IMPORT_POINTS})));}
+    catch(error){if(error instanceof ApiError&&error.code==='POINTS_REQUIRED')throw new ApiError(402,'AI_IMPORT_POINTS_REQUIRED','AI导入需要至少10点可用余额');throw error;}
+    const ticket={type:'membership_import_v1',jobId,sourceHash,state:'reserved',questionLimit:base.importLimit,createdAt:now,
+      funding:'points',pointsCost:AI_IMPORT_POINTS};
     await insert(owner,key,sha256(sourceHash),ticket);return readTicket({result:JSON.stringify(ticket)});
   });
   const finishImport=async(owner,jobId,success,sourceHash=undefined)=>transaction(owner,async(state,now)=>{
@@ -188,7 +163,7 @@ export function membershipAccount(store,{clock=Date.now}={}){
     if(!found){
       if(success!==false||sourceHash===undefined)throw new ApiError(404,'AI_IMPORT_JOB_NOT_FOUND','未找到导题授权记录');
       // Cancellation may beat a still-in-flight start. Bind the file before any future reservation can occur.
-      const stopped={type:'membership_import_v1',jobId,sourceHash,state:'released',questionLimit:describe(state,now).importLimit,
+      const stopped={type:'membership_import_v1',jobId,sourceHash,state:'released',questionLimit:base.importLimit,
         createdAt:now,finishedAt:now,funding:'quota',allowPointsExchange:false,pointsCost:0,pointsReserved:0,pointsCharged:0};
       await insert(owner,key,sha256(sourceHash),stopped);return stopped;
     }
@@ -198,18 +173,19 @@ export function membershipAccount(store,{clock=Date.now}={}){
       if(ticket.funding==='points'){
         const hold=importHoldKey(jobId,ticket.sourceHash);
         if(success){
-          const receipt=await wallet.capture(owner,hold,EXCHANGE_UNITS,{reason:'AI导入 · 点数兑换次数',ledgerKey:hold});
-          if(!receipt.settled||receipt.chargedUnits!==EXCHANGE_UNITS)throw new ApiError(409,'AI_IMPORT_EXCHANGE_UNSETTLED','本次导题点数预留尚未完成结算，请恢复原任务');
+          const units=ticket.pointsCost*100;
+          const receipt=await wallet.capture(owner,hold,units,{reason:'AI导入题库',ledgerKey:hold});
+          if(!receipt.settled||receipt.chargedUnits!==units)throw new ApiError(409,'AI_IMPORT_UNSETTLED','本次导题点数预留尚未完成结算，请恢复原任务');
         }else{
           const receipt=await wallet.release(owner,hold);
-          if(receipt.state!=='released')throw new ApiError(409,'AI_IMPORT_EXCHANGE_UNSETTLED','本次导题已有结算记录，未重复释放');
+          if(receipt.state!=='released')throw new ApiError(409,'AI_IMPORT_UNSETTLED','本次导题已有结算记录，未重复释放');
         }
       }else{
         if(state.reserved<1)throw new ApiError(500,'MEMBERSHIP_RECORD_INVALID','导题预留记录不一致');
         state.reserved--;if(success)state.used++;
       }
       ticket.state=success?'consumed':'released';ticket.finishedAt=now;
-      ticket.pointsReserved=0;ticket.pointsCharged=success&&ticket.funding==='points'?EXCHANGE_POINTS:0;
+      ticket.pointsReserved=0;ticket.pointsCharged=success?ticket.pointsCost:0;
       await write(owner,key,ticket);
     }else if(success&&ticket.state==='released')throw new ApiError(409,'AI_IMPORT_JOB_RELEASED','本次导题已取消，请新建任务');
     return ticket;
@@ -224,11 +200,11 @@ export function membershipAccount(store,{clock=Date.now}={}){
 
 export async function membershipRoutes(app,{store,auth}){
   const members=membershipAccount(store);
-  app.get('/v1/memberships/catalog',{preHandler:auth},async()=>({version:2,billing:'lifetime',currency:'CNY',items:MEMBERSHIP_PLANS,cloudEngineStatus:'not_connected'}));
+  app.get('/v1/memberships/catalog',{preHandler:auth},async()=>({version:3,billing:'lifetime',currency:'CNY',items:[]}));
   app.get('/v1/memberships/ai-imports/quota',{preHandler:auth},req=>members.quota(req.auth.user_id));
   app.post('/v1/memberships/ai-imports/:id/start',{preHandler:auth,bodyLimit:1024},async req=>{
-    fields(req.body,['sourceHash','allowPointsExchange']);
-    const ticket=await members.startImport(req.auth.user_id,req.params.id,req.body.sourceHash,req.body.allowPointsExchange);
+    fields(req.body,['sourceHash','allowPointsExchange','acceptedPointsCost']);
+    const ticket=await members.startImport(req.auth.user_id,req.params.id,req.body.sourceHash,req.body.acceptedPointsCost);
     const latest=await members.quota(req.auth.user_id);
     return {...ticket,aiImports:latest.aiImports,pointsAvailable:latest.pointsAvailable};
   });

@@ -2,8 +2,8 @@ import {randomBytes} from 'node:crypto';
 import {ApiError,authenticate,fields,sha256,text} from './security.js';
 import {points} from './account.js';
 import {availablePoints} from './point-values.js';
-import {POINTS_PACKAGES,AlipayFailure,amountString} from './alipay.js';
-import {membershipAccount,membershipPlan,MEMBERSHIP_PLANS} from './membership.js';
+import {POINTS_PACKAGES,AlipayFailure,amountString,pointsCardStyle} from './alipay.js';
+import {membershipAccount,membershipPlan} from './membership.js';
 import {pointWallet} from './point-wallet.js';
 
 const NOTIFY_PATH='/v1/payments/alipay/notify';
@@ -185,20 +185,18 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
     routes.get('/v1/payments/packages',{preHandler:auth},async()=>({provider:'alipay',currency:'CNY',
       ready:validTransport(payment),available:validTransport(payment),unavailableReason:validTransport(payment)?null:payment?.unavailableReason||'PAYMENT_NOT_OPEN',
       environment:payment?.environment||null,items:POINTS_PACKAGES.map(item=>({...item,label:item.title,priceCents:item.amountMinor,
-        amount:amountString(item.amountMinor),bonusPercent:Math.round((item.points*990/(item.amountMinor*100)-1)*100000)/1000}))}));
+        amount:amountString(item.amountMinor),cardStyle:pointsCardStyle(item.amountMinor),bonusPercent:Math.round((item.points*990/(item.amountMinor*100)-1)*100000)/1000}))}));
     routes.post('/v1/payments/orders',{preHandler:auth,bodyLimit:1024,config:{rateLimit:{max:6,timeWindow:'1 minute'}}},async req=>{
       fields(req.body,['packageId','membershipBilling']);const packageId=text(req.body.packageId,'套餐',1,64);
-      const chosen=[...POINTS_PACKAGES,...MEMBERSHIP_PLANS].find(item=>item.id===packageId);
-      if(!chosen)throw new ApiError(400,'PAYMENT_PACKAGE_NOT_FOUND','套餐不存在');
-      if(membershipPlan(chosen.id)&&req.body.membershipBilling!=='lifetime')
-        throw new ApiError(409,'MEMBERSHIP_CLIENT_UPDATE_REQUIRED','会员已改为一次购买永久有效，请更新App后开通');
+      const chosen=POINTS_PACKAGES.find(item=>item.id===packageId);
+      if(!chosen&&membershipPlan(packageId)?.id!==packageId)throw new ApiError(400,'PAYMENT_PACKAGE_NOT_FOUND','套餐不存在');
       const idempotencyHash=sha256(text(req.headers['idempotency-key'],'Idempotency-Key',1,128)),requestHash=sha256(JSON.stringify({packageId}));
       const begin=await store.transaction(async()=>{
         req.auth=await authenticate(store,req);
         const previous=await store.get('SELECT * FROM payment_orders WHERE owner_id=? AND idempotency_hash=?',req.auth.user_id,idempotencyHash);
         if(previous){if(previous.request_hash!==requestHash)throw new ApiError(409,'IDEMPOTENCY_CONFLICT','幂等键已用于其他套餐');return {row:previous,replay:true};}
+        if(!chosen)throw new ApiError(410,'MEMBERSHIP_SALES_ENDED','会员套餐已停止销售，请选择点数套餐');
         if(!validTransport(payment))unavailable(payment);
-        if(membershipPlan(chosen.id))await members.assertPurchasable(req.auth.user_id,chosen);
         const unresolved=await store.get("SELECT id FROM payment_orders WHERE owner_id=? AND status IN ('creating','uncertain') ORDER BY created_at LIMIT 1",req.auth.user_id);
         if(unresolved)throw new ApiError(409,'PAYMENT_CONFIRMATION_PENDING','已有订单待确认，请先查看原订单结果');
         const open=await store.get("SELECT COUNT(*) AS n FROM payment_orders WHERE owner_id=? AND status IN ('creating','pending','uncertain') AND expires_at>?",req.auth.user_id,Date.now());
@@ -206,7 +204,6 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
         const now=Date.now(),orderId=`pay_${randomBytes(16).toString('hex')}`;
         await store.run('INSERT INTO payment_orders(id,owner_id,idempotency_hash,request_hash,environment,app_id,seller_id,package_id,package_title,amount_minor,points,status,created_at,updated_at,expires_at,precreate_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
           orderId,req.auth.user_id,idempotencyHash,requestHash,payment.environment,payment.appId,payment.sellerId,chosen.id,chosen.title,chosen.amountMinor,chosen.points,'creating',now,now,now+900000,now);
-        if(membershipPlan(chosen.id))await members.freezeOffer(req.auth.user_id,orderId,chosen);
         await store.audit(req.auth.user_id,'payment-order-created',orderId,{provider:'alipay',packageId:chosen.id});
         return {row:await store.get('SELECT * FROM payment_orders WHERE id=?',orderId),replay:false};
       });

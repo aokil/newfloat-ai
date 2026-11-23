@@ -41,17 +41,14 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,ba
   app.get('/v1/admin/users',{preHandler:admin},async req=>{
     const where=[],args=[];
     if(req.query.search){where.push('(phone_number LIKE ? ESCAPE \'!\' OR display_name LIKE ? ESCAPE \'!\')');const value='%'+text(req.query.search,'search',1,128).replace(/[!%_]/gu,'!$&')+'%';args.push(value,value);}
-    if(req.query.membership){if(!['free','sponsor'].includes(req.query.membership))throw new ApiError(400,'INVALID_REQUEST','membership无效');where.push('membership=?');args.push(req.query.membership);}
     if(req.query.disabled!==undefined){if(!['true','false'].includes(req.query.disabled))throw new ApiError(400,'INVALID_REQUEST','disabled无效');where.push('disabled=?');args.push(req.query.disabled==='true'?1:0);}
     const page=await sqlPage(req,`SELECT * FROM users ${where.length?'WHERE '+where.join(' AND '):''} ORDER BY created_at DESC,id`,args);for(let i=0;i<page.items.length;i++)page.items[i]=await userInfo(store,page.items[i]);return page;
   });
   const user=async req=>{const u=await store.get('SELECT * FROM users WHERE id=?',req.params.id);if(!u)missing();await accountInfo(store,u);return await store.get('SELECT * FROM users WHERE id=?',u.id);};
   const change=async(req,allowed,action,fn)=>{fields(req.body,allowed);const reason=text(req.body.reason,'reason',1,2000);return await idem(req,sha256(JSON.stringify(req.body)),async()=>{const u=await user(req);if(req.body.expectedRevision!==undefined&&req.body.expectedRevision!==u.revision)conflict();const result=await fn(u,reason);await store.audit(req.auth.user_id,action,u.id,{reason});return result??await userInfo(store,await store.get('SELECT * FROM users WHERE id=?',u.id));});};
-  app.post('/v1/admin/users/:id/membership',{preHandler:admin},async req=>await change(req,['membership','membershipExpiresAt','expectedRevision','reason'],'membership',async(u)=>{
-    if(req.body.expectedRevision!==u.revision)conflict();if(!['free','sponsor'].includes(req.body.membership))throw new ApiError(400,'INVALID_REQUEST','会员类型无效');
-    const expires=req.body.membership==='sponsor'?timestamp(req.body.membershipExpiresAt):null;
-    await store.run('UPDATE users SET membership=?,membership_expires=?,revision=revision+1 WHERE id=?',req.body.membership,expires,u.id);
-  }));
+  app.post('/v1/admin/users/:id/membership',{preHandler:admin},async()=>{
+    throw new ApiError(410,'MEMBERSHIP_ENDED','账号已统一使用点数');
+  });
   app.post('/v1/admin/users/:id/status',{preHandler:admin},async req=>await change(req,['disabled','expectedRevision','reason'],'account-status',async(u)=>{
     if(req.body.expectedRevision!==u.revision)conflict();if(typeof req.body.disabled!=='boolean')throw new ApiError(400,'INVALID_REQUEST','disabled须为布尔值');
     if(req.body.disabled&&(u.id===req.auth.user_id||(u.role==='admin'&&!u.disabled&&(await store.get("SELECT COUNT(*) AS n FROM users WHERE role='admin' AND disabled=0")).n<=1)))throw new ApiError(422,'VALIDATION_FAILED','不能禁用自己或最后一个可用管理员');
@@ -213,7 +210,7 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,ba
   async function saveAnnouncement(req,old=null){
     fields(req.body,['title','body','status','audience','startsAt','endsAt','expectedVersion']);if(old&&req.body.expectedVersion!==old.version)conflict();
     const title=text(req.body.title??old?.title,'title',1,200),body=text(req.body.body??old?.body,'body',1,16000),status=req.body.status??old?.status??'draft',audience=req.body.audience??old?.audience??'all';
-    if(!['draft','published','withdrawn'].includes(status)||!['all','free','sponsor'].includes(audience))throw new ApiError(400,'INVALID_REQUEST','公告状态或受众无效');
+    if(!['draft','published','withdrawn'].includes(status)||!['all',old?.audience].includes(audience))throw new ApiError(400,'INVALID_REQUEST','公告状态或受众无效');
     const starts=req.body.startsAt===undefined?old?.starts_at??null:timestamp(req.body.startsAt),ends=req.body.endsAt===undefined?old?.ends_at??null:timestamp(req.body.endsAt);
     if(starts&&ends&&ends<=starts)throw new ApiError(400,'INVALID_REQUEST','公告结束时间须晚于开始时间');
     const announcementId=old?.id||id('announcement'),version=(old?.version||0)+1,published=status==='published'?(old?.published_at||Date.now()):old?.published_at??null;
@@ -225,8 +222,8 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,ba
   app.post('/v1/admin/announcements',{preHandler:admin},async req=>await idem(req,sha256(JSON.stringify(req.body)),async()=>await saveAnnouncement(req)));
   app.patch('/v1/admin/announcements/:id',{preHandler:admin},async req=>await idem(req,sha256(JSON.stringify(req.body)),async()=>{const row=await store.get('SELECT * FROM announcements WHERE id=?',req.params.id);if(!row)missing();return await saveAnnouncement(req,row);}));
   app.get('/v1/announcements',{preHandler:auth},async req=>{
-    const now=Date.now(),user=await store.get('SELECT * FROM users WHERE id=?',req.auth.user_id),effective=user.membership==='sponsor'&&(user.membership_expires===null||user.membership_expires>now)?'sponsor':'free';
-    const rows=await store.all(`SELECT a.* FROM announcements a WHERE status='published' AND (starts_at IS NULL OR starts_at<=?) AND (ends_at IS NULL OR ends_at>?) AND audience IN ('all',?) ${req.query.includeDismissed==='true'?'':"AND NOT EXISTS(SELECT 1 FROM announcement_dismissals d WHERE d.user_id=? AND d.announcement_id=a.id AND d.version=a.version)"} ORDER BY published_at DESC LIMIT 201`,now,now,effective,...(req.query.includeDismissed==='true'?[]:[user.id]));
+    const now=Date.now();
+    const rows=await store.all(`SELECT a.* FROM announcements a WHERE status='published' AND (starts_at IS NULL OR starts_at<=?) AND (ends_at IS NULL OR ends_at>?) AND audience='all' ${req.query.includeDismissed==='true'?'':"AND NOT EXISTS(SELECT 1 FROM announcement_dismissals d WHERE d.user_id=? AND d.announcement_id=a.id AND d.version=a.version)"} ORDER BY published_at DESC LIMIT 201`,now,now,...(req.query.includeDismissed==='true'?[]:[req.auth.user_id]));
     if(rows.length>200)throw new ApiError(503,'UNAVAILABLE','公告目录超过处理预算');return {items:rows.map(announcement)};
   });
   app.post('/v1/announcements/:id/dismiss',{preHandler:auth},async req=>{

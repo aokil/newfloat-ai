@@ -28,32 +28,32 @@ async function fixture(t){
       environment:payment.environment,appId:payment.appId,sellerId:payment.sellerId,status,source,paid:status==='TRADE_SUCCESS'};
   }
   const app=await testApp({paymentTransport:payment});t.after(()=>app.close());const user=await register(app,'synthetic-close');
-  const create=async(product,key=product)=>{const r=await call(app,'POST','/v1/payments/orders',user.accessToken,{packageId:product,...(product.startsWith('membership-')?{membershipBilling:'lifetime'}:{})},key);assert.equal(r.statusCode,200,r.body);return r.json();};
+  const create=async(product,key=product)=>{const r=await call(app,'POST','/v1/payments/orders',user.accessToken,{packageId:product},key);assert.equal(r.statusCode,200,r.body);return r.json();};
   const close=order=>call(app,'POST','/v1/payments/orders/'+order.orderId+'/close',user.accessToken,{});
   const notify=order=>app.inject({method:'POST',url:'/v1/payments/alipay/notify',headers:{'content-type':'application/x-www-form-urlencoded'},payload:'out_trade_no='+order.orderId+'&sign=synthetic'});
   return {app,user,state,create,close,notify};
 }
 
-test('switching Go to Plus and back closes old cashiers and uses a fresh Go order',async t=>{
-  const f=await fixture(t),go=await f.create('membership-go','go-first');
+test('switching point packages closes old cashiers and uses a fresh order',async t=>{
+  const f=await fixture(t),go=await f.create('points-100','go-first');
   let r=await f.close(go);assert.equal(r.statusCode,200,r.body);assert.equal(r.json().status,'closed');assert.equal(r.json().closeConfirmed,true);assert.equal(r.json().qrCode,null);
-  const plus=await f.create('membership-plus','plus');r=await f.close(plus);assert.equal(r.json().closeConfirmed,true);
-  const again=await f.create('membership-go','go-second');assert.notEqual(again.orderId,go.orderId);assert.equal(again.status,'pending');
-  const replay=await f.create('membership-go','go-first');assert.equal(replay.status,'closed');assert.equal(f.state.creates,3);
+  const plus=await f.create('points-600','plus');r=await f.close(plus);assert.equal(r.json().closeConfirmed,true);
+  const again=await f.create('points-100','go-second');assert.notEqual(again.orderId,go.orderId);assert.equal(again.status,'pending');
+  const replay=await f.create('points-100','go-first');assert.equal(replay.status,'closed');assert.equal(f.state.creates,3);
   const me=await call(f.app,'GET','/v1/me',f.user.accessToken);assert.equal(me.json().account.membership,'free');
 });
 
 for(const [product,cents,points] of [['points-100',990,100],['points-300',1990,300],['points-600',2990,600]]){
-  test('closing unpaid Plus then purchasing '+product+' retains the point package amount and type',async t=>{
-    const f=await fixture(t),plus=await f.create('membership-plus');
+  test('closing an unpaid order then purchasing '+product+' retains the point package amount and type',async t=>{
+    const f=await fixture(t),plus=await f.create('points-600','original-closed');
     const closed=await f.close(plus);assert.equal(closed.statusCode,200,closed.body);assert.equal(closed.json().closeConfirmed,true);
     const topup=await f.create(product);assert.equal(topup.packageId,product);assert.equal(topup.productType,'points');
     assert.equal(topup.amountMinor,cents);assert.equal(topup.points,points);assert.equal(topup.membership,null);assert.notEqual(topup.orderId,plus.orderId);
   });
 }
 
-test('missing Plus trade is cancelled locally and point checkout continues without waiting for sync',async t=>{
-  const f=await fixture(t),plus=await f.create('membership-plus');f.state.notFoundCloses=2;f.state.notFoundQueries=2;
+test('missing trade is cancelled locally and point checkout continues without waiting for sync',async t=>{
+  const f=await fixture(t),plus=await f.create('points-600');f.state.notFoundCloses=2;f.state.notFoundQueries=2;
   const closed=await f.close(plus);assert.equal(closed.statusCode,200,closed.body);assert.equal(closed.json().closeConfirmed,true);
   assert.equal(closed.json().closeAttempts,1);assert.equal(f.state.closes,1);
   assert.equal(closed.json().merchantCancelled,true);assert.equal(closed.json().providerCloseConfirmed,false);
@@ -62,88 +62,88 @@ test('missing Plus trade is cancelled locally and point checkout continues witho
 });
 
 test('persistent missing trade cancellation is idempotent and cannot revive its old cashier',async t=>{
-  const f=await fixture(t),plus=await f.create('membership-plus');f.state.notFoundCloses=99;f.state.notFoundQueries=99;
+  const f=await fixture(t),plus=await f.create('points-600');f.state.notFoundCloses=99;f.state.notFoundQueries=99;
   const r=await f.close(plus);assert.equal(r.json().status,'closed');assert.equal(r.json().closeConfirmed,true);
   assert.equal(r.json().closeAttempts,1);assert.equal(f.state.closes,1);
   assert.equal(r.json().errorCode,null);assert.equal(r.json().queryErrorCode,'PAYMENT_TRADE_NOT_FOUND');
   const again=await f.close(plus);assert.equal(again.json().merchantCancelled,true);assert.equal(f.state.closes,1);
-  assert.equal((await f.create('membership-plus')).status,'closed');assert.equal(f.state.creates,1);
+  assert.equal((await f.create('points-600')).status,'closed');assert.equal(f.state.creates,1);
   assert.equal((await f.notify(plus)).body,'success');
   const queried=await call(f.app,'GET','/v1/payments/orders/'+plus.orderId,f.user.accessToken);
   assert.equal(queried.json().status,'closed');assert.equal(queried.json().merchantCancelled,true);assert.equal(queried.json().providerCloseConfirmed,false);
-  const replacement=await f.create('membership-plus','replacement-plus');assert.notEqual(replacement.orderId,plus.orderId);
+  const replacement=await f.create('points-600','replacement-plus');assert.notEqual(replacement.orderId,plus.orderId);
 });
 
 test('a missing close response with a verified unpaid trade also ends the merchant attempt',async t=>{
-  const f=await fixture(t),plus=await f.create('membership-plus');f.state.closeError='PAYMENT_TRADE_NOT_FOUND';
+  const f=await fixture(t),plus=await f.create('points-600');f.state.closeError='PAYMENT_TRADE_NOT_FOUND';
   const r=await f.close(plus);assert.equal(r.json().status,'closed');assert.equal(r.json().closeConfirmed,true);
   assert.equal(r.json().merchantCancelled,true);assert.equal(r.json().providerCloseConfirmed,false);assert.equal(r.json().qrCode,null);
 });
 
-test('a late genuine payment after merchant cancellation still fulfills the original Plus exactly once',async t=>{
-  const f=await fixture(t),plus=await f.create('membership-plus');f.state.notFoundCloses=1;f.state.notFoundQueries=1;
+test('a late genuine payment after merchant cancellation still credits the original package exactly once',async t=>{
+  const f=await fixture(t),plus=await f.create('points-600');f.state.notFoundCloses=1;f.state.notFoundQueries=1;
   assert.equal((await f.close(plus)).json().merchantCancelled,true);
   const topup=await f.create('points-100');
   f.state.trades.set(plus.orderId,'TRADE_SUCCESS');assert.equal((await f.notify(plus)).body,'success');assert.equal((await f.notify(plus)).body,'success');
-  const me=await call(f.app,'GET','/v1/me',f.user.accessToken);assert.equal(me.json().account.membership,'plus');
-  assert.equal(me.json().account.membershipBenefits.aiImports.granted,17);assert.equal(me.json().account.wallet.monthlyAvailable,320);
+  const me=await call(f.app,'GET','/v1/me',f.user.accessToken);assert.equal(me.json().account.pointsCardStyle,'plus');
+  assert.equal(me.json().account.pointsAvailable,610);
   const original=await call(f.app,'GET','/v1/payments/orders/'+plus.orderId,f.user.accessToken);
   assert.equal(original.json().status,'paid');assert.equal(original.json().merchantCancelled,false);
   const pending=await call(f.app,'GET','/v1/payments/orders/'+topup.orderId,f.user.accessToken);assert.equal(pending.json().status,'pending');
 });
 
 test('a paid callback winning the missing-trade cancellation race is never overwritten',async t=>{
-  const f=await fixture(t),plus=await f.create('membership-plus');f.state.notFoundCloses=1;f.state.notFoundQueries=1;
+  const f=await fixture(t),plus=await f.create('points-600');f.state.notFoundCloses=1;f.state.notFoundQueries=1;
   f.state.onClose=async()=>{f.state.trades.set(plus.orderId,'TRADE_SUCCESS');assert.equal((await f.notify(plus)).body,'success');};
   const r=await f.close(plus);assert.equal(r.json().status,'paid');assert.equal(r.json().closeConfirmed,false);assert.equal(r.json().merchantCancelled,false);
 });
 
 test('missing close response combined with an unavailable query is not treated as missing confirmation',async t=>{
-  const f=await fixture(t),plus=await f.create('membership-plus');f.state.notFoundCloses=1;f.state.queryError='PAYMENT_PROVIDER_UNAVAILABLE';
+  const f=await fixture(t),plus=await f.create('points-600');f.state.notFoundCloses=1;f.state.queryError='PAYMENT_PROVIDER_UNAVAILABLE';
   const r=await f.close(plus);assert.equal(r.json().status,'pending');assert.equal(r.json().closeConfirmed,false);assert.equal(r.json().merchantCancelled,false);
   assert.equal(r.json().queryErrorCode,'PAYMENT_PROVIDER_UNAVAILABLE');
 });
 
 test('confirmed closes are idempotent and pending callbacks cannot reopen the cashier',async t=>{
-  const f=await fixture(t),go=await f.create('membership-go');await f.close(go);await f.close(go);assert.equal(f.state.closes,1);
+  const f=await fixture(t),go=await f.create('points-100');await f.close(go);await f.close(go);assert.equal(f.state.closes,1);
   f.state.trades.set(go.orderId,'WAIT_BUYER_PAY');assert.equal((await f.notify(go)).body,'success');
   const r=await call(f.app,'GET','/v1/payments/orders/'+go.orderId,f.user.accessToken);assert.equal(r.json().status,'closed');assert.equal(r.json().qrCode,null);
 });
 
 test('a payment winning the close race is fulfilled once and is not reported as cancelled',async t=>{
-  const f=await fixture(t),go=await f.create('membership-go');f.state.trades.set(go.orderId,'TRADE_SUCCESS');
-  const r=await f.close(go);assert.equal(r.statusCode,200,r.body);assert.equal(r.json().status,'paid');assert.equal(r.json().closeConfirmed,false);assert.equal(r.json().membership.plan,'go');
+  const f=await fixture(t),go=await f.create('points-100');f.state.trades.set(go.orderId,'TRADE_SUCCESS');
+  const r=await f.close(go);assert.equal(r.statusCode,200,r.body);assert.equal(r.json().status,'paid');assert.equal(r.json().closeConfirmed,false);assert.equal(r.json().pointsCredited,100);
   await f.close(go);assert.equal(f.state.closes,1);
-  const me=await call(f.app,'GET','/v1/me',f.user.accessToken);assert.equal(me.json().account.membershipBenefits.aiImports.granted,7);
+  const me=await call(f.app,'GET','/v1/me',f.user.accessToken);assert.equal(me.json().account.pointsCardStyle,'go');
 });
 
 test('an in-flight close cannot overwrite an accepted paid callback or trigger a refund marker',async t=>{
-  const f=await fixture(t),go=await f.create('membership-go');
+  const f=await fixture(t),go=await f.create('points-100');
   f.state.onClose=async()=>{f.state.trades.set(go.orderId,'TRADE_SUCCESS');assert.equal((await f.notify(go)).body,'success');f.state.trades.set(go.orderId,'WAIT_BUYER_PAY');};
   const r=await f.close(go);assert.equal(r.statusCode,200,r.body);assert.equal(r.json().status,'paid');assert.equal(r.json().closeConfirmed,false);assert.equal(r.json().refundReviewRequired,false);
 });
 
 test('failed close and unavailable query preserve the original pending order',async t=>{
-  const f=await fixture(t),go=await f.create('membership-go');f.state.closeError='PAYMENT_PROVIDER_UNAVAILABLE';f.state.queryError='PAYMENT_PROVIDER_UNAVAILABLE';
+  const f=await fixture(t),go=await f.create('points-100');f.state.closeError='PAYMENT_PROVIDER_UNAVAILABLE';f.state.queryError='PAYMENT_PROVIDER_UNAVAILABLE';
   const r=await f.close(go);assert.equal(r.statusCode,200,r.body);assert.equal(r.json().status,'pending');assert.equal(r.json().closeConfirmed,false);assert.equal(r.json().errorCode,'PAYMENT_PROVIDER_UNAVAILABLE');
   assert.equal(r.json().closeAttempts,1);assert.equal(f.state.closes,1);
-  assert.equal((await f.create('membership-go')).orderId,go.orderId);assert.equal(f.state.creates,1);
+  assert.equal((await f.create('points-100')).orderId,go.orderId);assert.equal(f.state.creates,1);
 });
 
 test('wrong close context without confirming query evidence cannot cancel an order',async t=>{
-  const f=await fixture(t),go=await f.create('membership-go');f.state.invalidClose=true;f.state.queryError='PAYMENT_PROVIDER_UNAVAILABLE';
+  const f=await fixture(t),go=await f.create('points-100');f.state.invalidClose=true;f.state.queryError='PAYMENT_PROVIDER_UNAVAILABLE';
   const r=await f.close(go);assert.equal(r.json().closeConfirmed,false);assert.equal(r.json().status,'pending');assert.equal(r.json().errorCode,'PAYMENT_INVALID_RECEIPT');
 });
 
 test('close is owner-only and rejects unsupported fields',async t=>{
-  const f=await fixture(t),go=await f.create('membership-go'),other=await register(f.app,'synthetic-other');
+  const f=await fixture(t),go=await f.create('points-100'),other=await register(f.app,'synthetic-other');
   const endpoint='/v1/payments/orders/'+go.orderId+'/close';
   assert.equal((await call(f.app,'POST',endpoint,other.accessToken,{})).statusCode,404);
   assert.equal((await call(f.app,'POST',endpoint,f.user.accessToken,{refund:true})).statusCode,400);assert.equal(f.state.closes,0);
 });
 
 test('a still-running precreate is not marked closed from a missing-trade response',async t=>{
-  const f=await fixture(t),go=await f.create('membership-go');
+  const f=await fixture(t),go=await f.create('points-100');
   await f.app.store.run("UPDATE payment_orders SET status='creating',qr_code=NULL,precreate_at=? WHERE id=?",Date.now(),go.orderId);
   const r=await f.close(go);assert.equal(r.statusCode,409,r.body);assert.equal(f.state.closes,0);
 });

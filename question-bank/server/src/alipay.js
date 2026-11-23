@@ -8,6 +8,7 @@ export const POINTS_PACKAGES=Object.freeze([
   Object.freeze({id:'points-300',title:'300 点套餐',amountMinor:1990,points:300}),
   Object.freeze({id:'points-600',title:'600 点套餐',amountMinor:2990,points:600})
 ]);
+export const pointsCardStyle=amountMinor=>amountMinor>990?'plus':amountMinor===990?'go':'default';
 const ENDPOINTS=Object.freeze({production:'https://openapi.alipay.com',sandbox:'https://openapi-sandbox.dl.alipaydev.com'});
 const ORDER_PATTERN=/^pay_[a-f0-9]{32}$/u;
 const TRADE_PATTERN=/^[A-Za-z0-9_]{1,64}$/u;

@@ -1,4 +1,5 @@
 import test from 'node:test';
+import {membershipAccount} from '../src/membership.js';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import {AsyncSqliteStore} from '../src/async-store.js';
@@ -144,7 +145,9 @@ test('missing live catalogue fails before submission and HTTP receipt requires a
   await importRepairRoutes(app,{store,cozeBridge:provider,auth:async req=>{if(req.headers.authorization!=='fixture')throw Object.assign(new Error('login'),{statusCode:401});req.auth={user_id:'one'};}});
   assert.equal((await app.inject({method:'GET',url:'/v1/ai/import-repair/receipt'})).statusCode,401);
   const headers={authorization:'fixture','idempotency-key':'http'};
-  const response=await app.inject({method:'POST',url:'/v1/ai/import-repair',headers,payload:wire()});assert.equal(response.statusCode,200);assert.equal(response.json().error.code,'IMPORT_REPAIR_LIVE_CATALOG_REQUIRED');assert.equal(provider.state.calls,0);
+  const importJobId='11111111-1111-4111-8111-111111111111';await store.run("UPDATE users SET points_balance=10 WHERE id='one'");
+  await membershipAccount(store).startImport('one',importJobId,wire().sourceHash,10);
+  const response=await app.inject({method:'POST',url:'/v1/ai/import-repair',headers,payload:{...wire(),importJobId}});assert.equal(response.statusCode,200);assert.equal(response.json().error.code,'IMPORT_REPAIR_LIVE_CATALOG_REQUIRED');assert.equal(provider.state.calls,0);
   assert.equal((await app.inject({method:'GET',url:'/v1/ai/import-repair/receipt',headers})).json().state,'failed');
 });
 test('gateway sends exactly one non-tool request and refuses compatibility retries',async t=>{
