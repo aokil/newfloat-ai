@@ -214,6 +214,14 @@ export function registerReferralRoutes(app,{store,auth,admin,distribution,secret
       return {operation:null};
     });
   });
+  app.get('/v1/referrals/withdrawals',userOnly,async req=>{
+    const before=req.query.before===undefined?null:Number(req.query.before);
+    if(before!==null&&(!Number.isSafeInteger(before)||before<=0))throw bad('分页无效');
+    const rows=await store.all(`SELECT id,units,status,created_at,processed_at FROM referral_cash_operations
+      WHERE owner_id=? AND kind='withdrawal' ${before===null?'':'AND created_at<?'}
+      ORDER BY created_at DESC,id DESC LIMIT 31`,req.auth.user_id,...(before===null?[]:[before]));
+    return {items:rows.slice(0,30).map(receipt),nextBefore:rows.length>30?Number(rows[29].created_at):null};
+  });
   app.post('/v1/referrals/withdrawals',userOnly,req=>operation(req,'withdrawal'));
   app.post('/v1/referrals/exchange',userOnly,req=>operation(req,'exchange'));
   app.get('/v1/admin/referral-withdrawals',adminOnly,async req=>{

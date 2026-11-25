@@ -42,7 +42,7 @@ async function fixture(t,hasDistribution=true){
       await creditReferralOrder(app.store,order,now);
     });
   }
-  return {app,call,owner,admin,code,path,friend,paid,advance:value=>{now=value;}};
+  return {app,call,owner,admin,code,path,friend,paid,user,advance:value=>{now=value;}};
 }
 
 test('23:00 is the new period and exact ten percent pays each direct registration once',async t=>{
@@ -87,6 +87,22 @@ test('cash exchange, withdrawal, role checks and request snapshots are independe
   for(let n=0;n<2;n++)assert.equal((await f.call('POST',`${path}/process`,f.admin,{})).json().status,'processed');
   const adminList=(await f.call('GET','/v1/admin/referral-withdrawals',f.admin)).json().items;
   assert.equal(adminList.length,2);assert.equal(adminList.find(item=>item.id===first.json().id).status,'processed');
+
+  const historyPath='/v1/referrals/withdrawals';
+  assert.equal((await f.call('GET',historyPath)).statusCode,401);
+  assert.equal((await f.call('GET',historyPath,f.admin)).statusCode,403);
+  const other=await f.user('other-inviter',99);
+  assert.deepEqual((await f.call('GET',historyPath,other)).json(),{items:[],nextBefore:null});
+
+  const history=await f.call('GET',historyPath,f.owner);
+  assert.equal(history.statusCode,200,history.body);
+  const processed=history.json().items[1];
+  assert.ok(processed.processedAt>=processed.createdAt);
+  assert.deepEqual(processed,{...first.json(),status:'processed',processedAt:processed.processedAt});
+  assert.deepEqual(history.json(),{items:[second.json(),processed],nextBefore:null});
+  assert.deepEqual((await f.call('GET',`${historyPath}?before=${second.json().createdAt}`,f.owner)).json(),
+    {items:[processed],nextBefore:null});
+  assert.equal((await f.call('GET',`${historyPath}?before=-1`,f.owner)).statusCode,400);
 });
 
 test('one share link per owner returns an APK attachment and its independently computed digest',async t=>{
