@@ -119,27 +119,37 @@ export function registerReferralRoutes(app,{store,auth,admin,distribution,secret
     return store.transaction(async()=>{
       const finalized=await store.get('SELECT registrations,paid FROM referral_periods WHERE owner_id=? AND period_start=?',owner,start);
       const counts=finalized?{registrations:Number(finalized.registrations),paid:Number(finalized.paid)}:await paidForPeriod(store,owner,start);
+      const total=await store.get('SELECT COUNT(*) AS registrations FROM referral_attributions WHERE owner_id=?',owner);
       const people=await store.all(`SELECT a.registered_at,u.phone_number,COALESCE((SELECT SUM(e.units) FROM referral_earnings e
         WHERE e.owner_id=a.owner_id AND e.friend_id=a.friend_id AND ${activeEarned}),0) AS units FROM referral_attributions a
         JOIN users u ON u.id=a.friend_id WHERE a.owner_id=? AND a.period_start=? ORDER BY a.registered_at DESC,a.friend_id LIMIT 31 OFFSET ?`,owner,start,offset);
       const qr=await store.get("SELECT id FROM referral_cash_operations WHERE owner_id=? AND kind='withdrawal' LIMIT 1",owner);
       return {...await cashSummary(store,owner),...counts,today:dayDate(current),date:dayDate(start),hasQr:!!qr,
+        totalRegistrations:Number(total.registrations),
         startsAt:start,endsAt:start+DAY,packageReady:!!distribution,items:people.slice(0,30).map(row=>({phone:mask(row.phone_number),registeredAt:Number(row.registered_at),units:money(row.units)})),
         nextOffset:people.length>30?offset+30:null};
     });
   });
 
+  function inviteCode(owner){
+    return store.transaction(async()=>{
+      const existing=await store.get('SELECT code FROM referral_codes WHERE owner_id=?',owner);
+      if(existing)return existing.code;
+      const code=randomBytes(32).toString('base64url');
+      await store.run('INSERT INTO referral_codes(owner_id,code) VALUES(?,?)',owner,code);
+      return code;
+    });
+  }
+
+  app.post('/v1/referrals/share-code',userOnly,async req=>{
+    fields(req.body,[]);
+    return {inviteCode:await inviteCode(req.auth.user_id)};
+  });
   app.post('/v1/referrals/share',userOnly,async req=>{
     fields(req.body,[]);
     if(!distribution)throw new ApiError(503,'REFERRAL_PACKAGE_UNAVAILABLE','分享安装包暂未就绪');
     await distribution.prepare();
-    const owner=req.auth.user_id;
-    return store.transaction(async()=>{
-      const existing=await store.get('SELECT code FROM referral_codes WHERE owner_id=?',owner);
-      const code=existing?.code??randomBytes(32).toString('base64url');
-      if(!existing)await store.run('INSERT INTO referral_codes(owner_id,code) VALUES(?,?)',owner,code);
-      return {path:`/v1/referrals/download/${code}`};
-    });
+    return {path:`/v1/referrals/download/${await inviteCode(req.auth.user_id)}`};
   });
   app.get('/v1/referrals/download/:code',async(req,reply)=>{
     const code=req.params.code;
