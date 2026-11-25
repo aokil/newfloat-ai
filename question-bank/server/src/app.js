@@ -20,6 +20,7 @@ import {lockCloudLibraryOwner,requireCloudLibraryCapacity} from './library-capac
 import { assistantRoutes } from './assistant-routes.js';
 import { assistantMediaRoutes } from './assistant-media-routes.js';
 import { assistantErrorDiagnostic, assistantBackendDiagnostic } from './assistant-provider-errors.js';
+import { bindReferral, registerReferralRoutes } from './referrals.js';
 import { registerPaymentRoutes } from './payment-routes.js';
 import { registerSessionEvents } from './session-events.js';
 import { communityRoutes } from './community-routes.js';
@@ -69,7 +70,7 @@ function indexedQuestions(payload) {
     });
     return { questions, typeCounts: { ...counts } };
 }
-export async function buildApp({ database = ':memory:', store: providedStore = null, logger = false, rateLimits = true, smsTransport = null, smsHmacKey = null, smsLimits = true, phoneVerifier = null, phoneProviders = null, phoneProviderEnvironment = null, defaultPhoneProvider = 'supabase', allowVerifiedPhoneRecovery = false, testHooks = {}, modelMasterKey = null, baichuanApiKey = null, deepseekApiKey = null, modelTransport, aiTransport, cozeBridge = null, paymentTransport = null, appUpdateDirectory = null, trustProxy = ['127.0.0.1', '::1'], bootstrapAdminPhone = null, androidReleaseCampaign = null } = {}) {
+export async function buildApp({ database = ':memory:', store: providedStore = null, logger = false, rateLimits = true, smsTransport = null, smsHmacKey = null, smsLimits = true, phoneVerifier = null, phoneProviders = null, phoneProviderEnvironment = null, defaultPhoneProvider = 'supabase', allowVerifiedPhoneRecovery = false, testHooks = {}, modelMasterKey = null, baichuanApiKey = null, deepseekApiKey = null, modelTransport, aiTransport, cozeBridge = null, paymentTransport = null, appUpdateDirectory = null, trustProxy = ['127.0.0.1', '::1'], bootstrapAdminPhone = null, androidReleaseCampaign = null, referralDistribution = null, referralSecret = null, referralClock = Date.now } = {}) {
     const store = providedStore || await AsyncSqliteStore.open(database);
     if (bootstrapAdminPhone !== null) bootstrapAdminPhone = phoneNumber(bootstrapAdminPhone);
     // Runtime readiness is shared with catalog/account checks; no credentials or
@@ -92,7 +93,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
     const phoneService=phoneProviders?new PhoneProviderService(store,{verifiers:phoneProviders,environment:phoneProviderEnvironment,defaultProvider:defaultPhoneProvider,limits:smsLimits,allowVerifiedPhoneRecovery}):null;
     const sms = phoneService || (phoneVerifier ? new ExternalPhoneService(store, { verifier: phoneVerifier, limits: smsLimits, allowVerifiedPhoneRecovery }) : new SmsService(store, { transport: smsTransport, hmacKey: smsHmacKey, limits: smsLimits }));
     await sms.initialize();
-    const app = Fastify({ logger: logger ? { level: 'info', redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body.apiKey', 'req.body.byok.apiKey', 'req.body.image', 'res.headers.set-cookie'] } : false,
+    const app = Fastify({ logger: logger ? { level: 'info', redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body.apiKey', 'req.body.byok.apiKey', 'req.body.image', 'req.body.inviteCode', 'res.headers.set-cookie'] } : false,
         bodyLimit: 4 * 1024 * 1024, trustProxy, requestTimeout: 30000 });
     app.addHook('preSerialization',async(req,_reply,payload)=>pointsResponse(payload,precisePointsRequest(req)));
     app.decorate('store', store);
@@ -170,6 +171,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
                 const bootstrap = bootstrapAdminPhone === data.username && !await store.get("SELECT id FROM users WHERE role='admin' LIMIT 1");
                 await store.run('INSERT INTO users(id,username,display_name,password_hash,role,created_at,phone_number,phone_verified,last_login_at,trial_started,trial_ends) VALUES(?,?,?,?,?,?,?,?,?,?,?)', userId, data.username, data.displayName, hash, bootstrap ? 'admin' : 'user', now, data.username, 1, now, now, now + 900000);
                 await sms.consumePrepared(proof, userId);
+                if (!bootstrap && data.clientId==='android') await bindReferral(store,userId,req.body.inviteCode,now);
                 if (bootstrap) await store.audit(userId, 'bootstrap-admin', userId);
                 await points(store, await store.get('SELECT * FROM users WHERE id=?', userId), 10, null, '首次注册赠送', 'registration-gift');
                 await store.audit(userId, 'register', userId);
@@ -796,6 +798,7 @@ export async function buildApp({ database = ':memory:', store: providedStore = n
     await assistantRoutes(app, { store, auth, modelMasterKey, baichuanApiKey, deepseekApiKey, rateLimits, cozeBridge });
     await assistantMediaRoutes(app, {store,auth,cozeBridge});
     await registerPaymentRoutes(app, { store, auth, payment: paymentTransport });
+    registerReferralRoutes(app,{store,auth,admin,distribution:referralDistribution,secret:referralSecret,clock:referralClock});
     registerAppUpdateRoutes(app, { directory: appUpdateDirectory });
     await app.register(staticFiles, { root: fileURLToPath(new URL('../public/', import.meta.url)), prefix: '/', index: ['index.html'], dotfiles: 'deny' });
     return app;

@@ -6,6 +6,8 @@ import {POINTS_PACKAGES,AlipayFailure,amountString,pointsCardStyle} from './alip
 import {membershipAccount,membershipPlan} from './membership.js';
 import {pointWallet} from './point-wallet.js';
 
+import {creditReferralOrder} from './referrals.js';
+
 const NOTIFY_PATH='/v1/payments/alipay/notify';
 const NOTIFY_LIMIT=16*1024;
 const OPEN_STATUSES=new Set(['creating','pending','uncertain']);
@@ -164,6 +166,7 @@ export async function registerPaymentRoutes(app,{store,auth,payment=null}){
         if(plan)await members.fulfill(row.owner_id,row.id,plan.id);
         else await points(store,user,row.points,null,'支付宝套餐购买',key);
         await store.run("UPDATE payment_orders SET status='paid',trade_no=?,receipt_hash=?,paid_at=?,checked_at=?,updated_at=?,error_code=NULL WHERE id=?",receipt.tradeNo,proof,now,now,now,row.id);
+        if(!plan)await creditReferralOrder(store,row,now);
         await store.audit(null,'payment-credited',row.id,{provider:'alipay',points:row.points,amountMinor:row.amount_minor});
       }else if(receipt.status==='TRADE_CLOSED'){
         await store.run("UPDATE payment_orders SET status='closed',trade_no=?,receipt_hash=?,checked_at=?,updated_at=?,error_code=NULL WHERE id=?",receipt.tradeNo,proof,now,now,row.id);

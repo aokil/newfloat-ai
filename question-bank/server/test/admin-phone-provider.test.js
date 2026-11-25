@@ -140,7 +140,7 @@ test('SQLite version11 upgrades without changing accounts; provider choice conta
       phone TEXT NOT NULL,verified_at INTEGER NOT NULL,PRIMARY KEY(issuer,subject));
     INSERT INTO external_phone_identities VALUES('old-supabase','old-subject','old','+8613800000099',123);
     PRAGMA user_version=11;`);store.close();
-  try{store=new Store(db);assert.equal(store.get('PRAGMA user_version').user_version,12);
+  try{store=new Store(db);assert.equal(store.get('PRAGMA user_version').user_version,13);
     assert.equal(store.get("SELECT password_hash FROM users WHERE id='old'").password_hash,'hash');
     assert.equal(store.get('SELECT COUNT(*) n FROM phone_provider_settings').n,0);
     assert.equal(store.get("SELECT verified_at FROM external_phone_identities WHERE issuer='old-supabase'").verified_at,123);

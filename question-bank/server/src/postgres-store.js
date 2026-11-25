@@ -1,10 +1,11 @@
 import {AsyncLocalStorage} from 'node:async_hooks';
 import pg from 'pg';
+import {REFERRAL_SCHEMA,REFERRAL_TABLES} from './referral-schema.js';
 import {pointUnits} from './point-values.js';
 import {migratePostgresPointPrecision,assertPostgresPointPrecision,ensurePostgresPointPrecision} from './point-precision-migration.js';
 
 const {Pool, types} = pg;
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 // All instances share these transaction locks, including single-statement writes.
 const LOCK_NAMESPACE = 1179406145;
 const WRITE_LOCK = 1413564759;
@@ -14,7 +15,7 @@ const APPLICATION_TABLES = ['users','sessions','used_refresh','imports','banks',
   'announcements','announcement_dismissals','external_phone_identities','ai_requests','payment_orders','user_feedback','app_promotions','phone_provider_settings'];
 
 // Coze can copy newer DDL while preserving an older production version marker.
-// Accept copied structures only after checking the complete version-8/9/10/11/12 contract;
+// Accept copied structures only after checking the complete version-8/9/10/11/12/13 contract;
 // the no-marker recovery additionally requires every business table to be empty.
 const SCHEMA_8_COLUMNS = {
   users:'id:text username:text display_name:text password_hash:text role:text disabled:integer created_at:bigint phone_number:text? phone_verified:integer last_login_at:bigint? membership:text membership_expires:bigint? trial_started:bigint trial_ends:bigint points_balance:bigint points_reserved:bigint revision:integer avatar_id:text?',
@@ -249,14 +250,16 @@ function normalizedDefinition(sql) {
 
 /** Read-only structural preflight; never writes markers, DDL or business rows. */
 export async function assertCopiedApplicationStructure(client, schema) {
-  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete version-8, version-9, version-10, version-11 or version-12 application schema');};
+  const fail = () => {throw new Error('Copied PostgreSQL schema is not a complete version-8, version-9, version-10, version-11, version-12 or version-13 application schema');};
   const existing = await client.query('SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname=$1',[schema]);
   const names = new Set(existing.rows.map(row => row.tablename));
+  const referral=REFERRAL_TABLES.some(name=>names.has(name));
+  if(referral&&(!names.has('phone_provider_settings')||REFERRAL_TABLES.some(name=>!names.has(name))))fail();
   const payment=names.has('payment_orders'),community=names.has('user_feedback')||names.has('app_promotions'),phone=names.has('phone_provider_settings');
   let copiedVersion=community?10:payment?9:8;
   if(community&&!payment)fail();
   if(phone&&!community)fail();
-  const tableNames = [...APPLICATION_TABLES.filter(name=>(community||!['user_feedback','app_promotions'].includes(name))&&(name!=='payment_orders'||payment)&&(name!=='phone_provider_settings'||phone)),'schema_metadata'];
+  const tableNames = [...APPLICATION_TABLES.filter(name=>(community||!['user_feedback','app_promotions'].includes(name))&&(name!=='payment_orders'||payment)&&(name!=='phone_provider_settings'||phone)), ...(referral?REFERRAL_TABLES:[]),'schema_metadata'];
   const columnContract={...SCHEMA_8_COLUMNS,...(payment?{payment_orders:PAYMENT_COLUMNS}:{}),...(community?{
     user_feedback:'id:text user_id:text body:text created_at:bigint',app_promotions:'id:text revision:integer content:text updated_at:bigint updated_by:text'}:{})};
   const primaryContract={...SCHEMA_8_PRIMARY,...(payment?{payment_orders:'id'}:{}),...(community?{user_feedback:'id',app_promotions:'id'}:{})};
@@ -271,6 +274,26 @@ export async function assertCopiedApplicationStructure(client, schema) {
     checkContract.phone_provider_settings=["environment IN ('DEV','PROD')","provider IN ('supabase','aliyun_pnvs')",'revision>0'];
     uniqueContract.external_phone_identities=['issuer,user_id'];
   }
+  if(referral){
+    Object.assign(columnContract,{
+      referral_codes:'owner_id:text code:text',
+      referral_attributions:'friend_id:text owner_id:text registered_at:bigint period_start:bigint',
+      referral_earnings:'id:text owner_id:text friend_id:text kind:text units:bigint created_at:bigint',
+      referral_periods:'owner_id:text period_start:bigint registrations:integer paid:integer settled_at:bigint',
+      referral_cash_operations:'id:text owner_id:text request_key:text request_hash:text kind:text units:bigint status:text qr_cipher:text? created_at:bigint processed_at:bigint? processed_by:text?'
+    });
+    Object.assign(primaryContract,{referral_codes:'owner_id',referral_attributions:'friend_id',referral_earnings:'id',
+      referral_periods:'owner_id,period_start',referral_cash_operations:'id'});
+    Object.assign(uniqueContract,{referral_codes:['code'],referral_cash_operations:['owner_id,request_key']});
+    for(const table of REFERRAL_TABLES)foreignContract[table]={owner_id:'users.id'};
+    foreignContract.referral_attributions.friend_id='users.id';foreignContract.referral_earnings.friend_id='users.id';
+    foreignContract.referral_cash_operations.processed_by='users.id';
+    Object.assign(checkContract,{referral_attributions:['friend_id<>owner_id'],referral_earnings:["kind IN ('commission','daily')",'units>0'],
+      referral_cash_operations:["kind IN ('withdrawal','exchange')","status IN ('pending','processed')",'units>0']});
+    Object.assign(indexContract,{referral_attributions_owner_period:['referral_attributions','owner_id,period_start,registered_at'],
+      referral_earnings_owner:['referral_earnings','owner_id,friend_id'],referral_cash_operations_owner:['referral_cash_operations','owner_id,kind,created_at'],
+      referral_cash_operations_queue:['referral_cash_operations','kind,status,created_at']});
+  }
   if (tableNames.some(name => !names.has(name))) fail();
   const columns = await client.query(`SELECT table_name,column_name,data_type,numeric_precision,numeric_scale,is_nullable,column_default,is_identity,identity_generation
     FROM information_schema.columns WHERE table_schema=$1 AND table_name=ANY($2::text[])`,[schema,tableNames]);
@@ -283,6 +306,7 @@ export async function assertCopiedApplicationStructure(client, schema) {
     copiedVersion=11;
   }
   if(phone)copiedVersion=12;
+  if(referral)copiedVersion=13;
   for (const [table,specification] of Object.entries(columnContract)) {
     const actual = columns.rows.filter(row => row.table_name === table);
     const expected = specification.split(' ').map(column => {const [name,type] = column.split(':'); return {name,type:type.replace(/\?$/u,''),nullable:type.endsWith('?')};});
@@ -478,7 +502,8 @@ DO $$ DECLARE identity_constraint TEXT; BEGIN
       AND c.conkey=ARRAY[(SELECT attnum FROM pg_catalog.pg_attribute WHERE attrelid=c.conrelid AND attname='user_id')]::smallint[];
   EXECUTE format('ALTER TABLE external_phone_identities DROP CONSTRAINT %I',identity_constraint);
 END $$;
-ALTER TABLE external_phone_identities ADD CONSTRAINT external_phone_identities_issuer_user_key UNIQUE(issuer,user_id);`
+ALTER TABLE external_phone_identities ADD CONSTRAINT external_phone_identities_issuer_user_key UNIQUE(issuer,user_id);`,
+  13: REFERRAL_SCHEMA
 };
 
 export class PostgresStore {
@@ -519,7 +544,7 @@ export class PostgresStore {
       await client.query(`CREATE SCHEMA IF NOT EXISTS "${this.schema}"`);
       const tables = await client.query('SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname=$1',[this.schema]);
       const names = new Set(tables.rows.map(row => row.tablename));
-      if (!names.has('schema_metadata') && APPLICATION_TABLES.some(name => names.has(name))) throw new Error('Existing PostgreSQL business tables have no schema marker; explicit migration is required');
+      if (!names.has('schema_metadata') && [...APPLICATION_TABLES,...REFERRAL_TABLES].some(name => names.has(name))) throw new Error('Existing PostgreSQL business tables have no schema marker; explicit migration is required');
       if (!names.has('schema_metadata')) {
         await client.query('CREATE TABLE schema_metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL,updated_at BIGINT NOT NULL)');
         await client.query('INSERT INTO schema_metadata(singleton,version,updated_at) VALUES(1,0,$1)',[Date.now()]);
@@ -548,16 +573,21 @@ export class PostgresStore {
           if (paymentRows.rows.length) throw new Error('Precopied payment table must be empty before version-8 migration');
         } else if(next===10 && (names.has('user_feedback')||names.has('app_promotions'))) {
           const structure=await assertCopiedApplicationStructure(client,this.schema);
-          if(![10,11,12].includes(structure.copiedVersion)||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
+          if(![10,11,12,13].includes(structure.copiedVersion)||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
             throw new Error('Precopied community schema is not the complete version-10 application schema');
           const populated=await client.query('SELECT 1 AS present FROM user_feedback UNION ALL SELECT 1 AS present FROM app_promotions LIMIT 1');
           if(populated.rows.length)throw new Error('Precopied community tables must be empty before version-10 migration');
         } else if(next===12&&names.has('phone_provider_settings')) {
           const structure=await assertCopiedApplicationStructure(client,this.schema);
-          if(structure.copiedVersion!==12||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
+          if(![12,13].includes(structure.copiedVersion)||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
             throw new Error('Precopied phone provider schema is not the complete version-12 application schema');
           const populated=await client.query('SELECT 1 AS present FROM phone_provider_settings LIMIT 1');
           if(populated.rows.length)throw new Error('Precopied phone provider settings must be empty before version-12 migration');
+        } else if(next===13&&REFERRAL_TABLES.some(name=>names.has(name))) {
+          const structure=await assertCopiedApplicationStructure(client,this.schema);
+          if(structure.copiedVersion!==13||names.size!==structure.tableNames.length)throw new Error('Precopied referral schema is incomplete');
+          const populated=await client.query(REFERRAL_TABLES.map(name=>'SELECT 1 AS present FROM '+name).join(' UNION ALL ')+' LIMIT 1');
+          if(populated.rows.length)throw new Error('Precopied referral tables must be empty before version-13 migration');
         } else await client.query(MIGRATIONS[next]);
         if (next === 3) {
           const imports = await client.query('SELECT id,preview FROM imports');
@@ -570,7 +600,7 @@ export class PostgresStore {
       }
       const completed = await client.query('SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname=$1',[this.schema]);
       const completedNames = new Set(completed.rows.map(row => row.tablename));
-      if (APPLICATION_TABLES.some(name => !completedNames.has(name))) throw new Error('PostgreSQL application schema is incomplete');
+      if ([...APPLICATION_TABLES,...REFERRAL_TABLES].some(name => !completedNames.has(name))) throw new Error('PostgreSQL application schema is incomplete');
       const precision=await ensurePostgresPointPrecision(client,this.schema,()=>this._verifyPointRepairStructure(client,completedNames));
       if(precision.repaired)await this._verifyPointRepairStructure(client,completedNames,11);
       await assertPostgresPointPrecision(client,this.schema);
@@ -584,7 +614,7 @@ export class PostgresStore {
   }
   async _verifyPointRepairStructure(client,names,expectedVersion=10){
     const structure=await assertCopiedApplicationStructure(client,this.schema);
-    const requiredVersion=names.has('phone_provider_settings')?12:expectedVersion;
+    const requiredVersion=names.has('referral_codes')?13:names.has('phone_provider_settings')?12:expectedVersion;
     if(structure.copiedVersion!==requiredVersion||names.size!==structure.tableNames.length||structure.tableNames.some(name=>!names.has(name)))
       throw new Error('POINTS_PRECISION_SCHEMA_INVALID');
   }

@@ -19,7 +19,7 @@ export function fields(body, allowed) {
     throw new ApiError(400, 'INVALID_REQUEST', '请求含未支持字段');
 }
 export function credentials(body, register = false) {
-  fields(body, register ? ['username','password','passwordConfirmation','verificationCode','challengeId','displayName','clientId'] : ['username','password','clientId']);
+  fields(body, register ? ['username','password','passwordConfirmation','verificationCode','challengeId','displayName','clientId','inviteCode'] : ['username','password','clientId']);
   const username = phoneNumber(body.username);
   if (!['web','android'].includes(body.clientId)) throw new ApiError(400, 'INVALID_REQUEST', 'clientId须为web或android');
   if (typeof body.password !== 'string' || body.password.length < (register ? 6 : 1) || body.password.length > (register ? 64 : 128))

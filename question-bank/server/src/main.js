@@ -1,3 +1,4 @@
+import {configuredReferralDistribution} from './referral-apk.js';
 import {buildApp} from './app.js';
 import {resolve} from 'node:path';
 import {configuredSmsTransport} from './aliyun-sms.js';
@@ -12,6 +13,7 @@ const app=await buildApp({database:resolve(process.env.BANK_DATABASE||'data/bank
   baichuanApiKey:process.env.BAICHUAN_API_KEY||null,
   deepseekApiKey:process.env.DEEPSEEK_API_KEY||null,
   paymentTransport:configuredAlipayTransport(),appUpdateDirectory:process.env.APP_UPDATE_DIRECTORY?resolve(process.env.APP_UPDATE_DIRECTORY):null,
+  referralDistribution:configuredReferralDistribution(process.env.REFERRAL_APK_URL),referralSecret:process.env.REFERRAL_SECRET||null,
   androidReleaseCampaign:new AndroidReleaseCampaign()});
 await app.listen({host,port});
 for(const signal of ['SIGTERM','SIGINT'])process.on(signal,async()=>{await app.close();process.exit(0);});

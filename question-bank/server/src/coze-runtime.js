@@ -1,4 +1,5 @@
 import {createHmac} from 'node:crypto';
+import {configuredReferralDistribution} from './referral-apk.js';
 import {buildApp} from './app.js';
 import {PostgresStore} from './postgres-store.js';
 import {configuredSupabasePhone} from './supabase-phone.js';
@@ -38,6 +39,7 @@ export async function createCozeApp({databaseUrl,phoneConfiguration,cozeBridge,e
       baichuanApiKey:env.BAICHUAN_API_KEY || null,
       deepseekApiKey:env.DEEPSEEK_API_KEY || null,
       bootstrapAdminPhone:env.BOOTSTRAP_ADMIN_PHONE || null,trustProxy:1,
+      referralDistribution:configuredReferralDistribution(env.REFERRAL_APK_URL),referralSecret:env.REFERRAL_SECRET||derive('float-ai/referral-key/v1'),
       androidReleaseCampaign:env.COZE_PROJECT_ENV==='PROD'?new AndroidReleaseCampaign():null});
     app.decorate('phoneReady',(await app.getDecorator('phoneProviderStatus')()).ready);
     await app.ready();
