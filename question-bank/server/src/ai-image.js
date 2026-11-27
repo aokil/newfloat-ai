@@ -6,6 +6,7 @@ export const AI_IMAGE_LIMIT=1024*1024;
 const DOCUMENTED_IMAGE_MODELS=new Set([
   'deepseek-flash',
   'doubao-seed-2-0-pro-260215','doubao-seed-2-0-lite-260215','doubao-seed-2-0-mini-260215',
+  'doubao-seed-2-1-turbo-260628',
   'qwen-3-5-plus-260215','qwen3.5-plus','qwen3.5-plus-2026-02-15'
 ]);
 export function modelSupportsImages(modelId,inputTypes){

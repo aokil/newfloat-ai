@@ -90,6 +90,6 @@ test('post-conversion financial or full-structure mismatch rolls the initializer
   }
 });
 test('future schema marker remains a hard failure without repair DDL',async()=>{
-  const f=fixture({version:13});await assert.rejects(()=>f.store._initialize(),/newer/u);
+  const f=fixture({version:14});await assert.rejects(()=>f.store._initialize(),/newer/u);
   assert.equal(f.log.at(-1).sql,'ROLLBACK');assert(!f.log.some(x=>x.sql.startsWith('ALTER TABLE')));
 });

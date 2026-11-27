@@ -8,6 +8,7 @@ import {ExternalPhoneService} from '../src/external-phone.js';
 import {SmsService} from '../src/sms.js';
 import {Store} from '../src/store.js';
 import {AsyncSqliteStore} from '../src/async-store.js';
+import {REFERRAL_TABLES} from '../src/referral-schema.js';
 import {ApiError} from '../src/security.js';
 import {buildApp} from '../src/app.js';
 import {call,password} from './helpers.js';
@@ -18,6 +19,7 @@ const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:
 const proofVerifier=(options={})=>({provider:'supabase',issuer:env.SUPABASE_URL+'/auth/v1',async send(){},async verify({phone}){return {issuer:this.issuer,subject,phone};},...options});
 const payload=(challengeId,username=phone)=>({username,challengeId,verificationCode:'123456',password,passwordConfirmation:password,clientId:'android'});
 const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return {promise,resolve};};
+const dropReferralTables=REFERRAL_TABLES.map(name=>`DROP TABLE ${name};`).join('\n');
 
 test('Supabase config is optional, pinned HTTPS, public-key only and absent config fails closed',async t=>{
   for(const override of [{SUPABASE_URL:''},{SUPABASE_PUBLISHABLE_KEY:''},{SUPABASE_URL:'http://example.org'},
@@ -168,13 +170,20 @@ test('schema 3 file upgrades to current schema and reopens preserving users; uns
   try {
     store=new Store(db);
     (await store.run('INSERT INTO users(id,username,display_name,password_hash,role,created_at,phone_number) VALUES(?,?,?,?,?,?,?)','synthetic-user',phone,'synthetic','unused-test-hash','user',1,phone));
-    // Remove only schema 4 additions to reconstruct the schema 3 starting point, without touching frozen files.
+    // Remove later schema additions from the synthetic fixture.
     (await store.close());store=null;
     const {DatabaseSync}=await import('node:sqlite');const old=new DatabaseSync(db);
-    old.exec('DROP TABLE phone_provider_settings; DROP TABLE user_feedback; DROP TABLE app_promotions; DROP TABLE payment_orders; DROP TABLE ai_requests; ALTER TABLE users DROP COLUMN avatar_id; ALTER TABLE banks DROP COLUMN deleted_at; ALTER TABLE banks DROP COLUMN description; DROP TABLE external_phone_identities; DROP INDEX sms_target_purpose; ALTER TABLE sms_challenges DROP COLUMN purpose; ALTER TABLE sms_challenges DROP COLUMN target_user_id; ALTER TABLE sms_challenges DROP COLUMN provider; ALTER TABLE sms_challenges DROP COLUMN issuer; ALTER TABLE sms_challenges DROP COLUMN attempt_nonce; PRAGMA user_version=3;');old.close();
+    try {
+      old.exec(`${dropReferralTables}
+        DROP TABLE phone_provider_settings; DROP TABLE user_feedback; DROP TABLE app_promotions; DROP TABLE payment_orders; DROP TABLE ai_requests;
+        ALTER TABLE users DROP COLUMN avatar_id; ALTER TABLE banks DROP COLUMN deleted_at; ALTER TABLE banks DROP COLUMN description;
+        DROP TABLE external_phone_identities; DROP INDEX sms_target_purpose; ALTER TABLE sms_challenges DROP COLUMN purpose;
+        ALTER TABLE sms_challenges DROP COLUMN target_user_id; ALTER TABLE sms_challenges DROP COLUMN provider;
+        ALTER TABLE sms_challenges DROP COLUMN issuer; ALTER TABLE sms_challenges DROP COLUMN attempt_nonce; PRAGMA user_version=3;`);
+    } finally {old.close();}
     store=new Store(db);assert.equal((await store.get('PRAGMA user_version')).user_version,13);assert.equal((await store.get('SELECT phone_number FROM users')).phone_number,phone);
     assert.equal((await store.get('SELECT COUNT(*) n FROM external_phone_identities')).n,0);(await store.close());store=null;
-    store=new Store(db);assert.equal((await store.get('SELECT COUNT(*) n FROM users')).n,1);store.db.exec('PRAGMA user_version=13;');(await store.close());store=null;
+    store=new Store(db);assert.equal((await store.get('SELECT COUNT(*) n FROM users')).n,1);store.db.exec('PRAGMA user_version=14;');(await store.close());store=null;
     assert.throws(()=>new Store(db),/newer/);
   }finally{(await store?.close());if(!resolve(dir).startsWith(artifactRoot+sep))throw new Error('Unsafe test cleanup');await rm(dir,{recursive:true,force:true});}
 });
@@ -190,7 +199,13 @@ test('schema 4 production-shaped identity and challenge rows migrate to current 
     (await store.run('INSERT INTO sms_challenges(id,phone,code_hmac,expires_at,created_at,ip_hash,state,provider,issuer) VALUES(?,?,?,?,?,?,?,?,?)','existing-challenge',phone,'',999999,100,'ip-hash','sent','supabase',env.SUPABASE_URL+'/auth/v1'));
     (await store.close());store=null;
     const {DatabaseSync}=await import('node:sqlite');const old=new DatabaseSync(db);
-    old.exec('DROP TABLE phone_provider_settings; DROP TABLE user_feedback; DROP TABLE app_promotions; DROP TABLE payment_orders; DROP TABLE ai_requests; ALTER TABLE users DROP COLUMN avatar_id; ALTER TABLE banks DROP COLUMN deleted_at; ALTER TABLE banks DROP COLUMN description; DROP INDEX sms_target_purpose; ALTER TABLE sms_challenges DROP COLUMN purpose; ALTER TABLE sms_challenges DROP COLUMN target_user_id; PRAGMA user_version=4;');old.close();
+    try {
+      old.exec(`${dropReferralTables}
+        DROP TABLE phone_provider_settings; DROP TABLE user_feedback; DROP TABLE app_promotions; DROP TABLE payment_orders; DROP TABLE ai_requests;
+        ALTER TABLE users DROP COLUMN avatar_id; ALTER TABLE banks DROP COLUMN deleted_at; ALTER TABLE banks DROP COLUMN description;
+        DROP INDEX sms_target_purpose; ALTER TABLE sms_challenges DROP COLUMN purpose;
+        ALTER TABLE sms_challenges DROP COLUMN target_user_id; PRAGMA user_version=4;`);
+    } finally {old.close();}
     store=new Store(db);assert.equal((await store.get('PRAGMA user_version')).user_version,13);
     const user=(await store.get('SELECT role,password_hash,points_balance,trial_started,trial_ends FROM users WHERE id=?','existing-user'));
     assert.equal(user.role,'admin');assert.equal(user.password_hash,'preserved-hash');assert.equal(user.points_balance,10);assert.equal(user.trial_started,123);assert.equal(user.trial_ends,900123);

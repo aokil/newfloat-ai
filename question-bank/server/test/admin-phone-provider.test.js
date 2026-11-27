@@ -5,6 +5,7 @@ import {resolve,join,sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {buildApp} from '../src/app.js';
 import {Store} from '../src/store.js';
+import {REFERRAL_TABLES} from '../src/referral-schema.js';
 import {hashPassword,sha256} from '../src/security.js';
 import {call,password} from './helpers.js';
 
@@ -133,19 +134,23 @@ test('SQLite version11 upgrades without changing accounts; provider choice conta
   const state=await f.status();assert.deepEqual(Object.keys(state).sort(),['provider','providers','ready','revision','updatedAt']);
   assert(!JSON.stringify(state).includes('synthetic:'));
   const db=join(resolve(fileURLToPath(new URL('../../artifacts/admin-phone-provider/',import.meta.url))),'migration-'+Date.now()+'.sqlite');
-  let store=new Store(db);store.run("INSERT INTO users(id,username,display_name,password_hash,role,created_at) VALUES('old','old','old','hash','user',1)");
-  store.db.exec(`DROP TABLE phone_provider_settings;
-    DROP TABLE external_phone_identities;
-    CREATE TABLE external_phone_identities(issuer TEXT NOT NULL,subject TEXT NOT NULL,user_id TEXT NOT NULL UNIQUE REFERENCES users(id),
-      phone TEXT NOT NULL,verified_at INTEGER NOT NULL,PRIMARY KEY(issuer,subject));
-    INSERT INTO external_phone_identities VALUES('old-supabase','old-subject','old','+8613800000099',123);
-    PRAGMA user_version=11;`);store.close();
-  try{store=new Store(db);assert.equal(store.get('PRAGMA user_version').user_version,13);
+  let store=new Store(db);
+  try{
+    store.run("INSERT INTO users(id,username,display_name,password_hash,role,created_at) VALUES('old','old','old','hash','user',1)");
+    store.db.exec(`${REFERRAL_TABLES.map(name=>`DROP TABLE ${name};`).join('\n')}
+      DROP TABLE phone_provider_settings;
+      DROP TABLE external_phone_identities;
+      CREATE TABLE external_phone_identities(issuer TEXT NOT NULL,subject TEXT NOT NULL,user_id TEXT NOT NULL UNIQUE REFERENCES users(id),
+        phone TEXT NOT NULL,verified_at INTEGER NOT NULL,PRIMARY KEY(issuer,subject));
+      INSERT INTO external_phone_identities VALUES('old-supabase','old-subject','old','+8613800000099',123);
+      PRAGMA user_version=11;`);
+    store.close();store=null;
+    store=new Store(db);assert.equal(store.get('PRAGMA user_version').user_version,13);
     assert.equal(store.get("SELECT password_hash FROM users WHERE id='old'").password_hash,'hash');
     assert.equal(store.get('SELECT COUNT(*) n FROM phone_provider_settings').n,0);
     assert.equal(store.get("SELECT verified_at FROM external_phone_identities WHERE issuer='old-supabase'").verified_at,123);
     store.run("INSERT INTO external_phone_identities VALUES('new-pnvs','new-subject','old','+8613800000099',124)");
     assert.throws(()=>store.run("INSERT INTO external_phone_identities VALUES('new-pnvs','another-subject','old','+8613800000099',125)"));
     assert.throws(()=>store.run("INSERT INTO phone_provider_settings VALUES('PROD','unknown',1,1,'old')"));
-  }finally{store.close();await rm(db,{force:true});await rm(db+'-wal',{force:true});await rm(db+'-shm',{force:true});}
+  }finally{store?.close();await rm(db,{force:true});await rm(db+'-wal',{force:true});await rm(db+'-shm',{force:true});}
 });

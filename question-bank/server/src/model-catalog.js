@@ -19,6 +19,15 @@ export const MODEL_CATALOG = Object.freeze([
 
 export const BAICHUAN_MODEL_IDS=Object.freeze({'baichuan-air':'Baichuan4-Air','baichuan-m2':'Baichuan-M2','baichuan-m3':'Baichuan-M3'});
 export const DEEPSEEK_MODEL_IDS=Object.freeze({'deepseek-flash':'deepseek-flash','deepseek-pro':'deepseek-v4-pro'});
+export const COZE_DOUBAO_21_TURBO_ID='doubao-seed-2-1-turbo-260628';
+
+/** Use the approved Turbo model for the existing Coze search binding. */
+export function searchModelConfig(config) {
+  if(config?.execution!=='coze'||config.provider!=='doubao'||config.catalogKey!=='doubao-pro'||
+    config.modelId!=='doubao-seed-2-0-pro-260215')return config;
+  return {...config,modelId:COZE_DOUBAO_21_TURBO_ID,displayName:'Doubao-Seed-2.1-turbo'};
+}
+
 export function environmentModelSlot(config){
   if(config?.provider==='baichuan'&&Object.hasOwn(BAICHUAN_MODEL_IDS,config.catalogKey))return {provider:'baichuan',modelId:BAICHUAN_MODEL_IDS[config.catalogKey],origin:'https://api.baichuan-ai.com/v1'};
   if(config?.provider==='deepseek'&&Object.hasOwn(DEEPSEEK_MODEL_IDS,config.catalogKey))return {provider:'deepseek',modelId:DEEPSEEK_MODEL_IDS[config.catalogKey],origin:'https://api.deepseek.com'};

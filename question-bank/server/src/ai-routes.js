@@ -5,7 +5,7 @@ import {membershipAccount} from './membership.js';
 import {BYOK_PROVIDERS,MODEL_PROVIDERS,byokConfiguration,officialModelSearch,officialModelExtract,modelSecret} from './models.js';
 import {validateExtractedQuestion,isDoubaoMiniModelId} from './ocr-extraction.js';
 import {availablePoints,pointUnits,precisePointsRequest} from './point-values.js';
-import {MODEL_CATALOG,catalogEntry,configuredCatalog,modelUnavailableReason,environmentModelSlot,DEEPSEEK_MODEL_IDS} from './model-catalog.js';
+import {MODEL_CATALOG,catalogEntry,configuredCatalog,modelUnavailableReason,environmentModelSlot,DEEPSEEK_MODEL_IDS,searchModelConfig} from './model-catalog.js';
 import {minimalAnswer} from './answer-only.js';
 import {validateAiImage,aiImageDigest,modelSupportsImages} from './ai-image.js';
 
@@ -85,10 +85,11 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,baichuanApiKey=nul
     }
     const items=MODEL_CATALOG.filter(item=>precisePointsRequest(req)||Number.isInteger(item.pointsPerCall)).map(item=>{
       const binding=bindings.get(item.key);
-      const imageModel=imageModels?.find(model=>model.model_id===binding?.config.modelId);
-      const supportsImages=!!binding&&(binding.config.execution!=='coze'||!!imageModel)&&modelSupportsImages(binding.config.modelId,imageModel?.input_types);
+      const config=searchModelConfig(binding?.config);
+      const imageModel=imageModels?.find(model=>model.model_id===config?.modelId);
+      const supportsImages=!!config&&(config.execution!=='coze'||!!imageModel)&&modelSupportsImages(config.modelId,imageModel?.input_types);
       const reason=modelUnavailableReason(item,binding)||(!keyUsable(binding,modelMasterKey,baichuanApiKey,deepseekApiKey)?'MODEL_KEY_NOT_CONFIGURED':null)||(available<item.pointsPerCall?'INSUFFICIENT_POINTS':null);
-      return {...item,name:binding?.config.execution==='coze'?binding.config.displayName:item.name,configured:!!binding,available:!reason,unavailableReason:reason,
+      return {...item,name:config?.execution==='coze'?config.displayName:item.name,configured:!!binding,available:!reason,unavailableReason:reason,
         supportsImages,capabilities:supportsImages?['text','image']:['text']};
     });
     const mini=items.find(item=>item.key==='doubao-mini'),miniBinding=bindings.get('doubao-mini');
@@ -147,7 +148,7 @@ export async function aiRoutes(app,{store,auth,modelMasterKey,baichuanApiKey=nul
         if(mode==='builtin'){
           const binding=(await configuredCatalog(store)).get(product.key),reason=modelUnavailableReason(product,binding);
           if(reason||!keyUsable(binding,modelMasterKey,baichuanApiKey,deepseekApiKey))throw new ApiError(503,'MODEL_UNAVAILABLE','该内置模型尚未配置、验证或启用，请选择其他模型');
-          row=binding.row;config=binding.config;cost=product.pointsPerCall;
+          row=binding.row;config=searchModelConfig(binding.config);cost=product.pointsPerCall;
           if(deepseek)config={...config,deepseekThinking:thinking,deepseekReasoningEffort:reasoningEffort};
           if(extraction){
             if(product.key!=='doubao-mini'||config.provider!=='doubao'||cost!==1||!isDoubaoMiniModelId(config.modelId))throw new ApiError(503,'MODEL_UNAVAILABLE','豆包 Mini 提取服务配置不匹配');

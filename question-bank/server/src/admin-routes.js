@@ -2,7 +2,7 @@ import {ApiError,fields,text,id,sha256,authenticate,phoneNumber,newPassword,hash
 import {userInfo,points,accountInfo} from './account.js';
 import {modelConfig,modelView,sealKey,modelSecret,environmentModelKeyFingerprint,officialModelTest,providerFailureCode} from './models.js';
 import {precisePointsRequest} from './point-values.js';
-import {environmentModelSlot} from './model-catalog.js';
+import {COZE_DOUBAO_21_TURBO_ID,environmentModelSlot,searchModelConfig} from './model-catalog.js';
 const missing=()=>{throw new ApiError(404,'NOT_FOUND','记录不存在');};
 const conflict=()=>{throw new ApiError(409,'VERSION_CONFLICT','记录已变化，请刷新后重试');};
 function timestamp(value){if(value===null||value===undefined)return null;const n=Date.parse(value);if(typeof value!=='string'||!Number.isFinite(n))throw new ApiError(400,'INVALID_REQUEST','日期须为ISO时间或null');return n;}
@@ -91,6 +91,7 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,ba
   function cozeCatalogKey(modelId){
     // Bind explicit ID families to price tiers; display names and version upgrade
     // assumptions never determine billing. Unknown aliases/families are rejected.
+    if(modelId===COZE_DOUBAO_21_TURBO_ID)return 'doubao-pro';
     const value=modelId.toLowerCase().replace(/[._]/gu,'-'),date='(?:-\\d{6}(?:\\d{2})?)?';
     const doubao=new RegExp(`^doubao-(?:seed-)?(?:\\d+(?:-\\d+){0,2}-)?(pro|lite|mini)(?:-\\d+[km])?${date}$`,'u').exec(value);
     if(doubao)return `doubao-${doubao[1]}`;
@@ -171,7 +172,7 @@ export function adminRoutes(app,{store,auth,admin,idem,integer,modelMasterKey,ba
       const row=await model(req),previous=await store.get('SELECT * FROM model_tests WHERE actor_id=? AND idempotency_key=?',req.auth.user_id,key);
       if(previous){if(previous.request_hash!==digest)throw new ApiError(409,'IDEMPOTENCY_CONFLICT','测试幂等键已用于其他版本');return {replay:previous.result?JSON.parse(previous.result):{testId:previous.id,status:previous.status,errorCode:'AWAITING_PROVIDER_RECONCILIATION'}};}
       if(req.body.expectedRevision!==row.revision)conflict();
-      const config=JSON.parse(row.config);
+      const config=searchModelConfig(JSON.parse(row.config));
       if(config.execution==='coze'){
         if(!store.cozeBridgeReady?.())throw new ApiError(503,'COZE_INTEGRATION_NOT_READY','Coze 模型集成尚未配置，请联系管理员');
       }else if(environmentModelSlot(config)){
